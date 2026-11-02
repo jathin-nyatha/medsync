@@ -1,0 +1,35 @@
+# Eclipse
+.metadata/
+.settings/
+.classpath
+.project
+.factorypath
+
+# IntelliJ IDEA
+.idea/
+*.iml
+
+# Gradle
+.gradle/
+build/
+
+# Maven
+target/
+
+# Logs
+*.log
+logs/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Local Spring configuration
+application-local.properties
+application-dev.properties
+application-prod.properties
+
+# OS files
+.DS_Store
+Thumbs.db
