@@ -7,6 +7,7 @@ import org.springframework.stereotype.Service;
 
 import com.medsync.auth.entity.Role;
 import com.medsync.auth.entity.User;
+import com.medsync.auth.exception.DuplicateEmailException;
 import com.medsync.auth.repository.UserRepository;
 
 @Service
@@ -23,10 +24,13 @@ public class UserService {
         this.passwordEncoder = passwordEncoder;
     }
 
-    public User registerUser(String email, String rawPassword, Role role) {
+    public User registerUser(
+            String email,
+            String rawPassword,
+            Role role) {
 
         if (userRepository.findByEmail(email).isPresent()) {
-            throw new IllegalArgumentException("User already exists");
+            throw new DuplicateEmailException("User already exists");
         }
 
         String encodedPassword = passwordEncoder.encode(rawPassword);
