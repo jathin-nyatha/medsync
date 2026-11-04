@@ -1,8 +1,11 @@
 
 package com.medsync.doctor.service;
 
+import java.util.Set;
+
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.ResourceAccessException;
@@ -12,18 +15,22 @@ import com.medsync.doctor.client.AuthServiceClient;
 import com.medsync.doctor.dto.DoctorEligibilityResponse;
 import com.medsync.doctor.entity.Doctor;
 import com.medsync.doctor.entity.DoctorStatus;
+import com.medsync.doctor.exception.AuthServiceAuthenticationException;
+import com.medsync.doctor.exception.AuthServiceAuthorizationException;
 import com.medsync.doctor.exception.AuthServiceUnavailableException;
 import com.medsync.doctor.exception.DoctorNotFoundException;
 import com.medsync.doctor.exception.DuplicateDoctorException;
 import com.medsync.doctor.exception.InvalidAuthUserException;
+import com.medsync.doctor.exception.InvalidPaginationException;
 import com.medsync.doctor.repository.DoctorRepository;
 
 @Service
-@Transactional
 public class DoctorService {
 
 	private final DoctorRepository doctorRepository;
 	private final AuthServiceClient authServiceClient;
+	private static final Set<String> ALLOWED_SORT_FIELDS = Set.of("id", "firstName", "lastName", "specialization",
+			"status", "createdAt", "updatedAt");
 
 	public DoctorService(DoctorRepository doctorRepository, AuthServiceClient authServiceClient) {
 
@@ -53,6 +60,20 @@ public class DoctorService {
 		return doctorRepository.save(doctor);
 	}
 
+	private void validatePageable(Pageable pageable) {
+
+		if (pageable == null) {
+			throw new InvalidPaginationException("Pagination information is required.");
+		}
+
+		for (Sort.Order order : pageable.getSort()) {
+
+			if (!ALLOWED_SORT_FIELDS.contains(order.getProperty())) {
+				throw new InvalidPaginationException("Sorting by '" + order.getProperty() + "' is not supported.");
+			}
+		}
+	}
+
 	private void validateAuthUserEligibility(Long authUserId, String authorizationHeader) {
 
 		try {
@@ -65,12 +86,19 @@ public class DoctorService {
 
 		} catch (RestClientResponseException exception) {
 
-			if (exception.getStatusCode().value() == 404) {
-				throw new InvalidAuthUserException("No Auth Service user exists with ID: " + authUserId);
+			int status = exception.getStatusCode().value();
+
+			if (status == 401) {
+				throw new AuthServiceAuthenticationException("Auth Service rejected the supplied credentials.");
 			}
 
-			if (exception.getStatusCode().value() == 401 || exception.getStatusCode().value() == 403) {
-				throw new InvalidAuthUserException("Auth Service rejected the authorization request.");
+			if (status == 403) {
+				throw new AuthServiceAuthorizationException(
+						"Caller is not authorized to access the Auth Service endpoint.");
+			}
+
+			if (status == 404) {
+				throw new InvalidAuthUserException("No Auth Service user exists with ID: " + authUserId);
 			}
 
 			throw new AuthServiceUnavailableException("Auth Service returned an unexpected HTTP error.", exception);
@@ -110,6 +138,8 @@ public class DoctorService {
 	@Transactional(readOnly = true)
 	public Page<Doctor> searchDoctors(DoctorStatus status, Pageable pageable) {
 
+		validatePageable(pageable);
+
 		if (status == null) {
 			return doctorRepository.findAll(pageable);
 		}
@@ -117,6 +147,7 @@ public class DoctorService {
 		return doctorRepository.findByStatus(status, pageable);
 	}
 
+	@Transactional
 	public Doctor updateDoctor(Long id, String firstName, String lastName, String specialization, String licenseNumber,
 			String phoneNumber) {
 
@@ -139,6 +170,7 @@ public class DoctorService {
 		return doctorRepository.save(doctor);
 	}
 
+	@Transactional
 	public Doctor updateDoctorStatus(Long id, DoctorStatus status) {
 
 		Doctor doctor = getDoctorById(id);

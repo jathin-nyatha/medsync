@@ -100,6 +100,24 @@ public class GlobalExceptionHandler {
 				"An unexpected error occurred.");
 	}
 
+	@ExceptionHandler(AuthServiceAuthenticationException.class)
+	public ProblemDetail handleAuthServiceAuthentication(AuthServiceAuthenticationException exception) {
+
+		return createProblem(HttpStatus.UNAUTHORIZED, "Auth Service Authentication Failed", exception.getMessage());
+	}
+
+	@ExceptionHandler(AuthServiceAuthorizationException.class)
+	public ProblemDetail handleAuthServiceAuthorization(AuthServiceAuthorizationException exception) {
+
+		return createProblem(HttpStatus.FORBIDDEN, "Auth Service Authorization Failed", exception.getMessage());
+	}
+
+	@ExceptionHandler(InvalidPaginationException.class)
+	public ProblemDetail handleInvalidPagination(InvalidPaginationException exception) {
+
+		return createProblem(HttpStatus.BAD_REQUEST, "Invalid Pagination Parameters", exception.getMessage());
+	}
+
 	private ProblemDetail createProblem(HttpStatus status, String title, String detail) {
 
 		ProblemDetail problem = ProblemDetail.forStatusAndDetail(status, detail);
