@@ -30,6 +30,12 @@ application-local.properties
 application-dev.properties
 application-prod.properties
 
+# JWT private keys and keystores
+jwt-keys/*.p12
+jwt-keys/*.jks
+jwt-keys/*private*
+jwt-keys/*.key
+
 # OS files
 .DS_Store
 Thumbs.db

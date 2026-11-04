@@ -1,9 +1,9 @@
+
 package com.medsync.auth.security;
 
+import java.security.PrivateKey;
 import java.time.Instant;
 import java.util.Date;
-
-import javax.crypto.SecretKey;
 
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
@@ -11,22 +11,18 @@ import org.springframework.stereotype.Service;
 import com.medsync.auth.entity.Role;
 
 import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.io.Decoders;
-import io.jsonwebtoken.security.Keys;
 
 @Service
 public class JwtService {
 
-	private final SecretKey signingKey;
+	private final PrivateKey signingKey;
 	private final String issuer;
 	private final long expiration;
 
-	public JwtService(@Value("${jwt.secret}") String secret, @Value("${jwt.issuer}") String issuer,
+	public JwtService(PrivateKey jwtPrivateKey, @Value("${jwt.issuer}") String issuer,
 			@Value("${jwt.expiration}") long expiration) {
 
-		byte[] keyBytes = Decoders.BASE64.decode(secret);
-
-		this.signingKey = Keys.hmacShaKeyFor(keyBytes);
+		this.signingKey = jwtPrivateKey;
 		this.issuer = issuer;
 		this.expiration = expiration;
 	}
@@ -36,6 +32,6 @@ public class JwtService {
 		Instant now = Instant.now();
 
 		return Jwts.builder().subject(email).claim("role", role.name()).issuer(issuer).issuedAt(Date.from(now))
-				.expiration(Date.from(now.plusMillis(expiration))).signWith(signingKey).compact();
+				.expiration(Date.from(now.plusMillis(expiration))).signWith(signingKey, Jwts.SIG.RS256).compact();
 	}
 }
