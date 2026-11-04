@@ -25,15 +25,17 @@ public class SecurityConfig {
 
 				.authorizeHttpRequests(authorize -> authorize
 
-						.requestMatchers("/api/auth/register").hasRole("ADMIN")
-
 						.requestMatchers("/api/auth/login").permitAll()
 
 						.requestMatchers("/actuator/health").permitAll()
 
-						.requestMatchers("/api/auth/protected").authenticated()
+						.requestMatchers("/api/auth/register").hasRole("ADMIN")
 
 						.requestMatchers("/api/auth/admin").hasRole("ADMIN")
+
+						.requestMatchers("/api/internal/**").hasRole("ADMIN")
+
+						.requestMatchers("/api/auth/protected").authenticated()
 
 						.anyRequest().authenticated())
 
