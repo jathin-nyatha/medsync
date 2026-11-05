@@ -1,7 +1,9 @@
+
 package com.medsync.auth.config;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
@@ -25,18 +27,19 @@ public class SecurityConfig {
 
 				.authorizeHttpRequests(authorize -> authorize
 
-						.requestMatchers("/api/auth/login").permitAll()
-
+						// Public endpoints
+						.requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
+						.requestMatchers(HttpMethod.POST, "/api/auth/register/patient").permitAll()
 						.requestMatchers("/actuator/health").permitAll()
 
-						.requestMatchers("/api/auth/register").hasRole("ADMIN")
+						// Administrator-only endpoints
+						.requestMatchers("/api/auth/register").hasRole("ADMIN").requestMatchers("/api/auth/admin")
+						.hasRole("ADMIN").requestMatchers("/api/internal/**").hasRole("ADMIN")
 
-						.requestMatchers("/api/auth/admin").hasRole("ADMIN")
-
-						.requestMatchers("/api/internal/**").hasRole("ADMIN")
-
+						// Authenticated endpoints
 						.requestMatchers("/api/auth/protected").authenticated()
 
+						// Everything else requires authentication
 						.anyRequest().authenticated())
 
 				.oauth2ResourceServer(

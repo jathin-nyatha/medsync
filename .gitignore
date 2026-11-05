@@ -1,41 +1,86 @@
-# Eclipse
+# ==========================================
+# IDE - Eclipse
+# ==========================================
 .metadata/
 .settings/
 .classpath
 .project
 .factorypath
+.apt_generated/
+.springBeans
+.sts4-cache/
 
-# IntelliJ IDEA
+# ==========================================
+# IDE - IntelliJ IDEA
+# ==========================================
 .idea/
 *.iml
+*.iws
+*.ipr
 
-# Gradle
-.gradle/
-build/
+# ==========================================
+# IDE - NetBeans
+# ==========================================
+/nbproject/private/
+/nbbuild/
+/dist/
+/nbdist/
+/.nb-gradle/
 
+# ==========================================
+# IDE - Visual Studio Code
+# ==========================================
+.vscode/
+
+# ==========================================
 # Maven
-target/
+# ==========================================
+**/target/
+.mvn/wrapper/maven-wrapper.jar
 
-# Logs
-*.log
-logs/
+# ==========================================
+# Gradle
+# ==========================================
+.gradle/
+**/build/
 
-# Environment variables
+# ==========================================
+# Environment Variables and Secrets
+# ==========================================
 .env
 .env.*
 !.env.example
 
-# Local Spring configuration
+# ==========================================
+# Local Spring Configuration
+# ==========================================
 application-local.properties
 application-dev.properties
 application-prod.properties
 
-# JWT private keys and keystores
-jwt-keys/*.p12
-jwt-keys/*.jks
-jwt-keys/*private*
-jwt-keys/*.key
+# ==========================================
+# JWT Private Keys and Keystores
+# ==========================================
+/jwt-keys/
+*.p12
+*.pfx
+*.jks
+*.key
+*-private.pem
 
-# OS files
+# ==========================================
+# Logs
+# ==========================================
+*.log
+logs/
+
+# ==========================================
+# OS Files
+# ==========================================
 .DS_Store
 Thumbs.db
+
+# ==========================================
+# Miscellaneous
+# ==========================================
+HELP.md

@@ -11,6 +11,7 @@ import org.springframework.web.bind.annotation.RestController;
 
 import com.medsync.auth.dto.LoginRequest;
 import com.medsync.auth.dto.LoginResponse;
+import com.medsync.auth.dto.PatientRegistrationRequest;
 import com.medsync.auth.dto.RegisterRequest;
 import com.medsync.auth.dto.RegisterResponse;
 import com.medsync.auth.entity.Role;
@@ -58,11 +59,21 @@ public class AuthController {
 
 		Role role = Role.valueOf(userDetails.getRole());
 
-		String accessToken = jwtService.generateToken(userDetails.getUsername(), role);
+		String accessToken = jwtService.generateToken(userDetails.getId(), userDetails.getUsername(), role);
 
 		LoginResponse response = new LoginResponse(accessToken, "Bearer", userDetails.getUsername(), role,
 				"Login successful");
 
 		return ResponseEntity.ok(response);
+	}
+
+	@PostMapping("/register/patient")
+	public ResponseEntity<RegisterResponse> registerPatient(@Valid @RequestBody PatientRegistrationRequest request) {
+
+		User user = userService.registerPatient(request.getEmail(), request.getPassword());
+
+		RegisterResponse response = new RegisterResponse(user.getId(), user.getEmail(), user.getRole());
+
+		return ResponseEntity.status(HttpStatus.CREATED).body(response);
 	}
 }

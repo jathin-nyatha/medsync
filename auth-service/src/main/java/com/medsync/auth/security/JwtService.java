@@ -27,11 +27,12 @@ public class JwtService {
 		this.expiration = expiration;
 	}
 
-	public String generateToken(String email, Role role) {
+	public String generateToken(Long userId, String email, Role role) {
 
 		Instant now = Instant.now();
 
-		return Jwts.builder().subject(email).claim("role", role.name()).issuer(issuer).issuedAt(Date.from(now))
-				.expiration(Date.from(now.plusMillis(expiration))).signWith(signingKey, Jwts.SIG.RS256).compact();
+		return Jwts.builder().subject(email).claim("userId", userId).claim("role", role.name()).issuer(issuer)
+				.issuedAt(Date.from(now)).expiration(Date.from(now.plusMillis(expiration)))
+				.signWith(signingKey, Jwts.SIG.RS256).compact();
 	}
 }

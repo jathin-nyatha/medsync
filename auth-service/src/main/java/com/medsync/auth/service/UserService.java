@@ -1,5 +1,6 @@
 package com.medsync.auth.service;
 
+import java.util.Locale;
 import java.util.Optional;
 
 import org.springframework.security.crypto.password.PasswordEncoder;
@@ -25,19 +26,29 @@ public class UserService {
 
 	public User registerUser(String email, String rawPassword, Role role) {
 
-		if (userRepository.findByEmail(email).isPresent()) {
+		String normalizedEmail = email.trim().toLowerCase(Locale.ROOT);
+
+		if (userRepository.findByEmail(normalizedEmail).isPresent()) {
 			throw new DuplicateEmailException("User already exists");
 		}
 
 		String encodedPassword = passwordEncoder.encode(rawPassword);
 
-		User user = new User(email, encodedPassword, role);
+		User user = new User(normalizedEmail, encodedPassword, role);
 
 		return userRepository.save(user);
 	}
 
+	public User registerPatient(String email, String rawPassword) {
+
+		return registerUser(email, rawPassword, Role.PATIENT);
+	}
+
 	public Optional<User> findByEmail(String email) {
-		return userRepository.findByEmail(email);
+
+		String normalizedEmail = email.trim().toLowerCase(Locale.ROOT);
+
+		return userRepository.findByEmail(normalizedEmail);
 	}
 
 	public DoctorEligibilityResponse checkDoctorEligibility(Long userId) {
