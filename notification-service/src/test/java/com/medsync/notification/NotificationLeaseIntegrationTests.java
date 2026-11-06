@@ -27,7 +27,8 @@ import com.medsync.notification.repository.NotificationRepository;
 import com.medsync.notification.service.NotificationClaimService;
 
 @SpringBootTest(properties = { "spring.datasource.url=jdbc:mysql://localhost:3306/medsync_notification_test",
-		"spring.jpa.hibernate.ddl-auto=create-drop", "spring.jpa.show-sql=false",
+		"spring.jpa.hibernate.ddl-auto=validate", "spring.flyway.enabled=true",
+		"spring.flyway.baseline-on-migrate=false", "spring.jpa.show-sql=false",
 		"medsync.notification.ses.enabled=false" })
 @AutoConfigureMockMvc
 class NotificationLeaseIntegrationTests {
