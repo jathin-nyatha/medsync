@@ -1,4 +1,3 @@
-
 package com.medsync.appointment.service;
 
 import java.time.Instant;
@@ -9,12 +8,15 @@ import org.springframework.data.domain.Pageable;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
+import com.medsync.appointment.dto.AppointmentNotificationContext;
+import com.medsync.appointment.dto.AppointmentNotificationPayload;
 import com.medsync.appointment.dto.AppointmentResponse;
 import com.medsync.appointment.dto.CancelAppointmentRequest;
 import com.medsync.appointment.dto.CreateAppointmentRequest;
 import com.medsync.appointment.dto.RescheduleAppointmentRequest;
 import com.medsync.appointment.entity.Appointment;
 import com.medsync.appointment.entity.AppointmentStatus;
+import com.medsync.appointment.entity.OutboxEventType;
 import com.medsync.appointment.exception.AppointmentConflictException;
 import com.medsync.appointment.exception.AppointmentNotFoundException;
 import com.medsync.appointment.exception.InvalidAppointmentOperationException;
@@ -28,6 +30,7 @@ public class AppointmentService {
 	private final AppointmentRepository appointmentRepository;
 	private final AppointmentMapper appointmentMapper;
 	private final ScheduleLockService scheduleLockService;
+	private final OutboxEventPublisher outboxEventPublisher;
 
 	private static final Set<AppointmentStatus> BLOCKING_STATUSES = AppointmentStatus.getScheduleBlockingStatuses();
 
@@ -35,11 +38,12 @@ public class AppointmentService {
 			.getActiveAssignmentStatuses();
 
 	public AppointmentService(AppointmentRepository appointmentRepository, AppointmentMapper appointmentMapper,
-			ScheduleLockService scheduleLockService) {
+			ScheduleLockService scheduleLockService, OutboxEventPublisher outboxEventPublisher) {
 
 		this.appointmentRepository = appointmentRepository;
 		this.appointmentMapper = appointmentMapper;
 		this.scheduleLockService = scheduleLockService;
+		this.outboxEventPublisher = outboxEventPublisher;
 	}
 
 	// ---------------------------------------------------------
@@ -47,7 +51,8 @@ public class AppointmentService {
 	// ---------------------------------------------------------
 
 	@Transactional
-	public AppointmentResponse createAppointment(CreateAppointmentRequest request, Long createdByAuthUserId) {
+	public AppointmentResponse createAppointment(CreateAppointmentRequest request, Long createdByAuthUserId,
+			AppointmentNotificationContext notificationContext) {
 
 		if (request == null) {
 			throw new InvalidAppointmentRequestException("Appointment request is required.");
@@ -56,6 +61,8 @@ public class AppointmentService {
 		validatePositiveId(request.patientId(), "Patient ID");
 		validatePositiveId(request.doctorAuthUserId(), "Doctor user ID");
 		validatePositiveId(createdByAuthUserId, "Creator user ID");
+
+		validateNotificationContext(notificationContext, request.patientId(), request.doctorAuthUserId());
 
 		validateAppointmentTime(request.startAt(), request.endAt());
 
@@ -74,7 +81,11 @@ public class AppointmentService {
 		appointment.setReason(request.reason().trim());
 		appointment.setStatus(AppointmentStatus.SCHEDULED);
 
-		return appointmentMapper.toResponse(appointmentRepository.saveAndFlush(appointment));
+		Appointment savedAppointment = appointmentRepository.saveAndFlush(appointment);
+
+		publishNotification(OutboxEventType.APPOINTMENT_CONFIRMATION, savedAppointment, notificationContext);
+
+		return appointmentMapper.toResponse(savedAppointment);
 	}
 
 	// ---------------------------------------------------------
@@ -131,7 +142,8 @@ public class AppointmentService {
 	// ---------------------------------------------------------
 
 	@Transactional
-	public AppointmentResponse rescheduleAppointment(Long appointmentId, RescheduleAppointmentRequest request) {
+	public AppointmentResponse rescheduleAppointment(Long appointmentId, RescheduleAppointmentRequest request,
+			AppointmentNotificationContext notificationContext) {
 
 		validatePositiveId(appointmentId, "Appointment ID");
 
@@ -139,8 +151,10 @@ public class AppointmentService {
 			throw new InvalidAppointmentRequestException("Reschedule request is required.");
 		}
 
-		// Initial read is used only to identify schedule lock keys.
 		Appointment initialAppointment = findAppointment(appointmentId);
+
+		validateNotificationContext(notificationContext, initialAppointment.getPatientId(),
+				initialAppointment.getDoctorAuthUserId());
 
 		// Consistent lock order: doctor first, patient second.
 		scheduleLockService.acquireLocks(initialAppointment.getDoctorAuthUserId(), initialAppointment.getPatientId());
@@ -149,6 +163,8 @@ public class AppointmentService {
 		Appointment appointment = findAppointmentForUpdate(appointmentId);
 
 		validateUnchangedParticipants(initialAppointment, appointment, "rescheduling");
+
+		validateNotificationContext(notificationContext, appointment.getPatientId(), appointment.getDoctorAuthUserId());
 
 		validateReschedulableStatus(appointment);
 
@@ -160,7 +176,11 @@ public class AppointmentService {
 		appointment.setStartAt(request.startAt());
 		appointment.setEndAt(request.endAt());
 
-		return appointmentMapper.toResponse(appointmentRepository.saveAndFlush(appointment));
+		Appointment savedAppointment = appointmentRepository.saveAndFlush(appointment);
+
+		publishNotification(OutboxEventType.APPOINTMENT_RESCHEDULED, savedAppointment, notificationContext);
+
+		return appointmentMapper.toResponse(savedAppointment);
 	}
 
 	// ---------------------------------------------------------
@@ -168,7 +188,8 @@ public class AppointmentService {
 	// ---------------------------------------------------------
 
 	@Transactional
-	public AppointmentResponse cancelAppointment(Long appointmentId, CancelAppointmentRequest request) {
+	public AppointmentResponse cancelAppointment(Long appointmentId, CancelAppointmentRequest request,
+			AppointmentNotificationContext notificationContext) {
 
 		validatePositiveId(appointmentId, "Appointment ID");
 
@@ -177,8 +198,10 @@ public class AppointmentService {
 			throw new InvalidAppointmentRequestException("Cancellation reason is required.");
 		}
 
-		// Initial read is used only to identify schedule lock keys.
 		Appointment initialAppointment = findAppointment(appointmentId);
+
+		validateNotificationContext(notificationContext, initialAppointment.getPatientId(),
+				initialAppointment.getDoctorAuthUserId());
 
 		scheduleLockService.acquireLocks(initialAppointment.getDoctorAuthUserId(), initialAppointment.getPatientId());
 
@@ -186,13 +209,19 @@ public class AppointmentService {
 
 		validateUnchangedParticipants(initialAppointment, appointment, "cancellation");
 
+		validateNotificationContext(notificationContext, appointment.getPatientId(), appointment.getDoctorAuthUserId());
+
 		validateCancellableStatus(appointment);
 
 		appointment.setStatus(AppointmentStatus.CANCELLED);
 		appointment.setCancellationReason(request.cancellationReason().trim());
 		appointment.setCancelledAt(Instant.now());
 
-		return appointmentMapper.toResponse(appointmentRepository.saveAndFlush(appointment));
+		Appointment savedAppointment = appointmentRepository.saveAndFlush(appointment);
+
+		publishNotification(OutboxEventType.APPOINTMENT_CANCELLED, savedAppointment, notificationContext);
+
+		return appointmentMapper.toResponse(savedAppointment);
 	}
 
 	// ---------------------------------------------------------
@@ -200,17 +229,28 @@ public class AppointmentService {
 	// ---------------------------------------------------------
 
 	@Transactional
-	public AppointmentResponse updateAppointmentStatus(Long appointmentId, AppointmentStatus newStatus) {
+	public AppointmentResponse updateAppointmentStatus(Long appointmentId, AppointmentStatus newStatus,
+			AppointmentNotificationContext notificationContext) {
 
 		validatePositiveId(appointmentId, "Appointment ID");
 
 		Appointment initialAppointment = findAppointment(appointmentId);
+
+		if (newStatus == AppointmentStatus.CANCELLED) {
+			validateNotificationContext(notificationContext, initialAppointment.getPatientId(),
+					initialAppointment.getDoctorAuthUserId());
+		}
 
 		scheduleLockService.acquireLocks(initialAppointment.getDoctorAuthUserId(), initialAppointment.getPatientId());
 
 		Appointment appointment = findAppointmentForUpdate(appointmentId);
 
 		validateUnchangedParticipants(initialAppointment, appointment, "status update");
+
+		if (newStatus == AppointmentStatus.CANCELLED) {
+			validateNotificationContext(notificationContext, appointment.getPatientId(),
+					appointment.getDoctorAuthUserId());
+		}
 
 		validateStatusTransition(appointment.getStatus(), newStatus);
 
@@ -220,7 +260,48 @@ public class AppointmentService {
 			appointment.setCancelledAt(Instant.now());
 		}
 
-		return appointmentMapper.toResponse(appointmentRepository.saveAndFlush(appointment));
+		Appointment savedAppointment = appointmentRepository.saveAndFlush(appointment);
+
+		if (newStatus == AppointmentStatus.CANCELLED) {
+			publishNotification(OutboxEventType.APPOINTMENT_CANCELLED, savedAppointment, notificationContext);
+		}
+
+		return appointmentMapper.toResponse(savedAppointment);
+	}
+
+	// ---------------------------------------------------------
+	// OUTBOX EVENT CREATION
+	// ---------------------------------------------------------
+
+	private void publishNotification(OutboxEventType eventType, Appointment appointment,
+			AppointmentNotificationContext context) {
+
+		AppointmentNotificationPayload payload = new AppointmentNotificationPayload(context.recipientEmail(),
+				context.patientName(), context.doctorName(), appointment.getStartAt().toString(),
+				appointment.getReason(), "APPT-" + appointment.getId(), appointment.getCancellationReason());
+
+		outboxEventPublisher.publish(eventType, appointment.getId(), payload);
+	}
+
+	private void validateNotificationContext(AppointmentNotificationContext context, Long patientId,
+			Long doctorAuthUserId) {
+
+		if (context == null) {
+			throw new InvalidAppointmentRequestException("Appointment notification participant context is required.");
+		}
+
+		if (!patientId.equals(context.patientId()) || !doctorAuthUserId.equals(context.doctorAuthUserId())) {
+
+			throw new InvalidAppointmentOperationException(
+					"Notification participant context does not match the appointment participants.");
+		}
+
+		if (context.recipientEmail() == null || context.recipientEmail().isBlank() || context.patientName() == null
+				|| context.patientName().isBlank() || context.doctorName() == null || context.doctorName().isBlank()) {
+
+			throw new InvalidAppointmentRequestException(
+					"Appointment notification participant details are incomplete.");
+		}
 	}
 
 	// ---------------------------------------------------------

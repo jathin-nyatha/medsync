@@ -1,4 +1,3 @@
-
 package com.medsync.appointment.service;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -10,37 +9,58 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestClientResponseException;
 
+import com.medsync.appointment.client.AuthUserEmailClient;
+import com.medsync.appointment.client.ServiceTokenProvider;
+import com.medsync.appointment.client.dto.AuthUserEmailResponse;
 import com.medsync.appointment.client.dto.DoctorValidationResponse;
 import com.medsync.appointment.client.dto.PatientValidationResponse;
-import com.medsync.appointment.dto.CreateAppointmentRequest;
+import com.medsync.appointment.dto.AppointmentNotificationContext;
 import com.medsync.appointment.exception.AppointmentReferenceValidationException;
 
 @Service
 public class AppointmentValidationService {
 
 	private final RestClient restClient;
+	private final ServiceTokenProvider serviceTokenProvider;
+	private final AuthUserEmailClient authUserEmailClient;
 	private final String doctorServiceUrl;
 	private final String patientServiceUrl;
 
-	public AppointmentValidationService(RestClient medSyncRestClient,
+	public AppointmentValidationService(RestClient medSyncRestClient, ServiceTokenProvider serviceTokenProvider,
+			AuthUserEmailClient authUserEmailClient,
 			@Value("${medsync.clients.doctor-service-url}") String doctorServiceUrl,
 			@Value("${medsync.clients.patient-service-url}") String patientServiceUrl) {
 
 		this.restClient = medSyncRestClient;
+		this.serviceTokenProvider = serviceTokenProvider;
+		this.authUserEmailClient = authUserEmailClient;
 		this.doctorServiceUrl = removeTrailingSlash(doctorServiceUrl);
 		this.patientServiceUrl = removeTrailingSlash(patientServiceUrl);
 	}
 
-	public void validateAppointmentReferences(CreateAppointmentRequest request, String authorizationHeader) {
+	/**
+	 * Resolves all participant information before the appointment transaction
+	 * starts. No downstream HTTP calls should be made from AppointmentService.
+	 */
+	public AppointmentNotificationContext resolveNotificationContext(Long patientId, Long doctorAuthUserId) {
 
-		validateAuthorizationHeader(authorizationHeader);
+		validatePositiveId(patientId, "Patient ID");
+		validatePositiveId(doctorAuthUserId, "Doctor user ID");
 
-		validatePatient(request.patientId(), authorizationHeader);
+		String authorizationHeader = serviceTokenProvider.getAuthorizationHeader();
 
-		validateDoctor(request.doctorAuthUserId(), authorizationHeader);
+		PatientValidationResponse patient = getPatient(patientId, authorizationHeader);
+
+		DoctorValidationResponse doctor = getDoctor(doctorAuthUserId, authorizationHeader);
+
+		AuthUserEmailResponse emailResponse = authUserEmailClient.getUserEmail(patient.authUserId());
+
+		return new AppointmentNotificationContext(patientId, doctorAuthUserId, emailResponse.email().trim(),
+				buildFullName(patient.firstName(), patient.lastName(), "Patient"),
+				buildFullName(doctor.firstName(), doctor.lastName(), "Doctor"));
 	}
 
-	private void validatePatient(Long patientId, String authorizationHeader) {
+	private PatientValidationResponse getPatient(Long patientId, String authorizationHeader) {
 
 		PatientValidationResponse patient = executeRequest(
 				() -> restClient.get().uri(patientServiceUrl + "/api/patients/{patientId}", patientId)
@@ -48,26 +68,28 @@ public class AppointmentValidationService {
 						.body(PatientValidationResponse.class),
 				"Patient Service");
 
-		if (patient == null || patient.id() == null || !patientId.equals(patient.id())) {
+		if (patient == null || patient.id() == null || !patientId.equals(patient.id()) || patient.authUserId() == null
+				|| patient.authUserId() <= 0) {
 
-			throw new AppointmentReferenceValidationException(HttpStatus.BAD_GATEWAY,
-					"Invalid Patient Service Response",
-					"Patient Service returned an invalid patient profile response.");
+			throw invalidResponse("Invalid Patient Service Response",
+					"Patient Service returned an invalid patient profile.");
 		}
+
+		return patient;
 	}
 
-	private void validateDoctor(Long doctorAuthUserId, String authorizationHeader) {
+	private DoctorValidationResponse getDoctor(Long doctorAuthUserId, String authorizationHeader) {
 
 		DoctorValidationResponse doctor = executeRequest(() -> restClient.get()
 				.uri(doctorServiceUrl + "/api/doctors/by-auth-user/{authUserId}", doctorAuthUserId)
 				.header(HttpHeaders.AUTHORIZATION, authorizationHeader).retrieve().body(DoctorValidationResponse.class),
 				"Doctor Service");
 
-		if (doctor == null || doctor.authUserId() == null || !doctorAuthUserId.equals(doctor.authUserId())
-				|| doctor.status() == null) {
+		if (doctor == null || doctor.id() == null || doctor.authUserId() == null
+				|| !doctorAuthUserId.equals(doctor.authUserId()) || doctor.status() == null) {
 
-			throw new AppointmentReferenceValidationException(HttpStatus.BAD_GATEWAY, "Invalid Doctor Service Response",
-					"Doctor Service returned an invalid doctor profile response.");
+			throw invalidResponse("Invalid Doctor Service Response",
+					"Doctor Service returned an invalid doctor profile.");
 		}
 
 		if (!"ACTIVE".equalsIgnoreCase(doctor.status())) {
@@ -75,6 +97,24 @@ public class AppointmentValidationService {
 			throw new AppointmentReferenceValidationException(HttpStatus.UNPROCESSABLE_ENTITY, "Inactive Doctor",
 					"Appointments cannot be scheduled with an inactive doctor.");
 		}
+
+		return doctor;
+	}
+
+	private String buildFullName(String firstName, String lastName, String participantType) {
+
+		String first = firstName == null ? "" : firstName.trim();
+		String last = lastName == null ? "" : lastName.trim();
+
+		String fullName = (first + " " + last).trim();
+
+		if (fullName.isBlank() || fullName.length() > 150) {
+
+			throw invalidResponse("Invalid " + participantType + " Name",
+					participantType + " profile contains an invalid name.");
+		}
+
+		return fullName;
 	}
 
 	private <T> T executeRequest(RemoteRequest<T> request, String serviceName) {
@@ -97,11 +137,10 @@ public class AppointmentValidationService {
 
 				throw new AppointmentReferenceValidationException(HttpStatus.BAD_GATEWAY,
 						"Downstream Authentication Failed",
-						serviceName + " rejected the forwarded authentication token.");
+						serviceName + " rejected Appointment Service authentication.");
 			}
 
 			if (statusCode >= 500 && statusCode <= 599) {
-
 				throw serviceUnavailable(serviceName);
 			}
 
@@ -125,13 +164,17 @@ public class AppointmentValidationService {
 				"Dependent Service Unavailable", serviceName + " is unavailable. Please try again later.");
 	}
 
-	private void validateAuthorizationHeader(String authorizationHeader) {
+	private AppointmentReferenceValidationException invalidResponse(String title, String message) {
 
-		if (authorizationHeader == null || authorizationHeader.isBlank()
-				|| !authorizationHeader.startsWith("Bearer ")) {
+		return new AppointmentReferenceValidationException(HttpStatus.BAD_GATEWAY, title, message);
+	}
 
-			throw new AppointmentReferenceValidationException(HttpStatus.UNAUTHORIZED, "Missing Authentication Token",
-					"A valid Bearer token is required for profile validation.");
+	private void validatePositiveId(Long id, String fieldName) {
+
+		if (id == null || id <= 0) {
+
+			throw new AppointmentReferenceValidationException(HttpStatus.BAD_REQUEST, "Invalid Reference",
+					fieldName + " must be a positive number.");
 		}
 	}
 

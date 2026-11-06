@@ -20,11 +20,14 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import com.medsync.appointment.dto.AppointmentNotificationContext;
+import com.medsync.appointment.dto.AppointmentNotificationPayload;
 import com.medsync.appointment.dto.CancelAppointmentRequest;
 import com.medsync.appointment.dto.CreateAppointmentRequest;
 import com.medsync.appointment.dto.RescheduleAppointmentRequest;
 import com.medsync.appointment.entity.Appointment;
 import com.medsync.appointment.entity.AppointmentStatus;
+import com.medsync.appointment.entity.OutboxEventType;
 import com.medsync.appointment.exception.AppointmentConflictException;
 import com.medsync.appointment.exception.AppointmentNotFoundException;
 import com.medsync.appointment.exception.InvalidAppointmentOperationException;
@@ -41,6 +44,9 @@ class AppointmentServiceTests {
 	@Mock
 	private ScheduleLockService scheduleLockService;
 
+	@Mock
+	private OutboxEventPublisher outboxEventPublisher;
+
 	private AppointmentService appointmentService;
 
 	private static final Long APPOINTMENT_ID = 1001L;
@@ -48,14 +54,17 @@ class AppointmentServiceTests {
 	private static final Long DOCTOR_ID = 25L;
 	private static final Long CREATOR_ID = 10L;
 
+	private static final AppointmentNotificationContext TEST_NOTIFICATION_CONTEXT = new AppointmentNotificationContext(
+			PATIENT_ID, DOCTOR_ID, "patient@example.com", "Aarav Sharma", "Dr. Meera Nair");
+
 	private Instant startAt;
 	private Instant endAt;
 
 	@BeforeEach
 	void setUp() {
 
-		appointmentService = new AppointmentService(appointmentRepository, new AppointmentMapper(),
-				scheduleLockService);
+		appointmentService = new AppointmentService(appointmentRepository, new AppointmentMapper(), scheduleLockService,
+				outboxEventPublisher);
 
 		startAt = Instant.now().plusSeconds(86_400);
 		endAt = startAt.plusSeconds(1_800);
@@ -76,7 +85,7 @@ class AppointmentServiceTests {
 			return appointment;
 		});
 
-		var response = appointmentService.createAppointment(request, CREATOR_ID);
+		var response = appointmentService.createAppointment(request, CREATOR_ID, TEST_NOTIFICATION_CONTEXT);
 
 		assertThat(response.id()).isEqualTo(APPOINTMENT_ID);
 		assertThat(response.patientId()).isEqualTo(PATIENT_ID);
@@ -87,15 +96,18 @@ class AppointmentServiceTests {
 
 		verify(scheduleLockService).acquireLocks(DOCTOR_ID, PATIENT_ID);
 		verify(appointmentRepository).saveAndFlush(any(Appointment.class));
+
+		verify(outboxEventPublisher).publish(eq(OutboxEventType.APPOINTMENT_CONFIRMATION), eq(APPOINTMENT_ID),
+				any(AppointmentNotificationPayload.class));
 	}
 
 	@Test
 	void createAppointmentRejectsNullRequest() {
 
-		assertThatThrownBy(() -> appointmentService.createAppointment(null, CREATOR_ID))
+		assertThatThrownBy(() -> appointmentService.createAppointment(null, CREATOR_ID, TEST_NOTIFICATION_CONTEXT))
 				.isInstanceOf(InvalidAppointmentRequestException.class);
 
-		verifyNoInteractions(appointmentRepository, scheduleLockService);
+		verifyNoInteractions(appointmentRepository, scheduleLockService, outboxEventPublisher);
 	}
 
 	@Test
@@ -104,10 +116,10 @@ class AppointmentServiceTests {
 		CreateAppointmentRequest request = new CreateAppointmentRequest(0L, DOCTOR_ID, startAt, endAt,
 				"General consultation");
 
-		assertThatThrownBy(() -> appointmentService.createAppointment(request, CREATOR_ID))
+		assertThatThrownBy(() -> appointmentService.createAppointment(request, CREATOR_ID, TEST_NOTIFICATION_CONTEXT))
 				.isInstanceOf(InvalidAppointmentRequestException.class);
 
-		verifyNoInteractions(scheduleLockService);
+		verifyNoInteractions(scheduleLockService, outboxEventPublisher);
 	}
 
 	@Test
@@ -116,19 +128,19 @@ class AppointmentServiceTests {
 		CreateAppointmentRequest request = new CreateAppointmentRequest(PATIENT_ID, -1L, startAt, endAt,
 				"General consultation");
 
-		assertThatThrownBy(() -> appointmentService.createAppointment(request, CREATOR_ID))
+		assertThatThrownBy(() -> appointmentService.createAppointment(request, CREATOR_ID, TEST_NOTIFICATION_CONTEXT))
 				.isInstanceOf(InvalidAppointmentRequestException.class);
 
-		verifyNoInteractions(scheduleLockService);
+		verifyNoInteractions(scheduleLockService, outboxEventPublisher);
 	}
 
 	@Test
 	void createAppointmentRejectsInvalidCreatorId() {
 
-		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(startAt, endAt), 0L))
-				.isInstanceOf(InvalidAppointmentRequestException.class);
+		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(startAt, endAt), 0L,
+				TEST_NOTIFICATION_CONTEXT)).isInstanceOf(InvalidAppointmentRequestException.class);
 
-		verifyNoInteractions(scheduleLockService);
+		verifyNoInteractions(scheduleLockService, outboxEventPublisher);
 	}
 
 	@Test
@@ -137,19 +149,19 @@ class AppointmentServiceTests {
 		Instant pastStart = Instant.now().minusSeconds(3_600);
 		Instant pastEnd = pastStart.plusSeconds(1_800);
 
-		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(pastStart, pastEnd), CREATOR_ID))
-				.isInstanceOf(InvalidAppointmentTimeException.class);
+		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(pastStart, pastEnd), CREATOR_ID,
+				TEST_NOTIFICATION_CONTEXT)).isInstanceOf(InvalidAppointmentTimeException.class);
 
-		verifyNoInteractions(scheduleLockService);
+		verifyNoInteractions(scheduleLockService, outboxEventPublisher);
 	}
 
 	@Test
 	void createAppointmentRejectsEndTimeBeforeStartTime() {
 
 		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(startAt, startAt.minusSeconds(60)),
-				CREATOR_ID)).isInstanceOf(InvalidAppointmentTimeException.class);
+				CREATOR_ID, TEST_NOTIFICATION_CONTEXT)).isInstanceOf(InvalidAppointmentTimeException.class);
 
-		verifyNoInteractions(scheduleLockService);
+		verifyNoInteractions(scheduleLockService, outboxEventPublisher);
 	}
 
 	@Test
@@ -158,11 +170,13 @@ class AppointmentServiceTests {
 		when(appointmentRepository.existsDoctorScheduleConflict(eq(DOCTOR_ID), anyCollection(), eq(startAt), eq(endAt)))
 				.thenReturn(true);
 
-		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(startAt, endAt), CREATOR_ID))
-				.isInstanceOf(AppointmentConflictException.class).hasMessageContaining("Doctor");
+		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(startAt, endAt), CREATOR_ID,
+				TEST_NOTIFICATION_CONTEXT)).isInstanceOf(AppointmentConflictException.class)
+				.hasMessageContaining("Doctor");
 
 		verify(scheduleLockService).acquireLocks(DOCTOR_ID, PATIENT_ID);
 		verify(appointmentRepository, never()).saveAndFlush(any(Appointment.class));
+		verifyNoInteractions(outboxEventPublisher);
 	}
 
 	@Test
@@ -171,10 +185,26 @@ class AppointmentServiceTests {
 		when(appointmentRepository.existsPatientScheduleConflict(eq(PATIENT_ID), anyCollection(), eq(startAt),
 				eq(endAt))).thenReturn(true);
 
-		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(startAt, endAt), CREATOR_ID))
-				.isInstanceOf(AppointmentConflictException.class).hasMessageContaining("Patient");
+		assertThatThrownBy(() -> appointmentService.createAppointment(createRequest(startAt, endAt), CREATOR_ID,
+				TEST_NOTIFICATION_CONTEXT)).isInstanceOf(AppointmentConflictException.class)
+				.hasMessageContaining("Patient");
 
 		verify(appointmentRepository, never()).saveAndFlush(any(Appointment.class));
+		verifyNoInteractions(outboxEventPublisher);
+	}
+
+	@Test
+	void createAppointmentRejectsMismatchedNotificationContext() {
+
+		AppointmentNotificationContext invalidContext = new AppointmentNotificationContext(999L, DOCTOR_ID,
+				"patient@example.com", "Aarav Sharma", "Dr. Meera Nair");
+
+		assertThatThrownBy(
+				() -> appointmentService.createAppointment(createRequest(startAt, endAt), CREATOR_ID, invalidContext))
+				.isInstanceOf(InvalidAppointmentOperationException.class)
+				.hasMessageContaining("Notification participant context does not match");
+
+		verifyNoInteractions(scheduleLockService, appointmentRepository, outboxEventPublisher);
 	}
 
 	// ---------------------------------------------------------
@@ -249,7 +279,7 @@ class AppointmentServiceTests {
 				.thenAnswer(invocation -> invocation.getArgument(0));
 
 		var response = appointmentService.rescheduleAppointment(APPOINTMENT_ID,
-				new RescheduleAppointmentRequest(newStart, newEnd));
+				new RescheduleAppointmentRequest(newStart, newEnd), TEST_NOTIFICATION_CONTEXT);
 
 		assertThat(response.startAt()).isEqualTo(newStart);
 		assertThat(response.endAt()).isEqualTo(newEnd);
@@ -261,6 +291,9 @@ class AppointmentServiceTests {
 
 		verify(appointmentRepository).existsPatientScheduleConflictExcluding(eq(PATIENT_ID), anyCollection(),
 				eq(newStart), eq(newEnd), eq(APPOINTMENT_ID));
+
+		verify(outboxEventPublisher).publish(eq(OutboxEventType.APPOINTMENT_RESCHEDULED), eq(APPOINTMENT_ID),
+				any(AppointmentNotificationPayload.class));
 	}
 
 	@Test
@@ -273,11 +306,12 @@ class AppointmentServiceTests {
 		when(appointmentRepository.findByIdForUpdate(APPOINTMENT_ID)).thenReturn(Optional.of(appointment));
 
 		assertThatThrownBy(() -> appointmentService.rescheduleAppointment(APPOINTMENT_ID,
-				new RescheduleAppointmentRequest(startAt, endAt)))
+				new RescheduleAppointmentRequest(startAt, endAt), TEST_NOTIFICATION_CONTEXT))
 				.isInstanceOf(InvalidAppointmentOperationException.class);
 
 		verify(scheduleLockService).acquireLocks(DOCTOR_ID, PATIENT_ID);
 		verify(appointmentRepository, never()).saveAndFlush(any(Appointment.class));
+		verifyNoInteractions(outboxEventPublisher);
 	}
 
 	@Test
@@ -293,9 +327,11 @@ class AppointmentServiceTests {
 				eq(endAt), eq(APPOINTMENT_ID))).thenReturn(true);
 
 		assertThatThrownBy(() -> appointmentService.rescheduleAppointment(APPOINTMENT_ID,
-				new RescheduleAppointmentRequest(startAt, endAt))).isInstanceOf(AppointmentConflictException.class);
+				new RescheduleAppointmentRequest(startAt, endAt), TEST_NOTIFICATION_CONTEXT))
+				.isInstanceOf(AppointmentConflictException.class);
 
 		verify(appointmentRepository, never()).saveAndFlush(any(Appointment.class));
+		verifyNoInteractions(outboxEventPublisher);
 	}
 
 	@Test
@@ -304,9 +340,10 @@ class AppointmentServiceTests {
 		when(appointmentRepository.findById(APPOINTMENT_ID)).thenReturn(Optional.empty());
 
 		assertThatThrownBy(() -> appointmentService.rescheduleAppointment(APPOINTMENT_ID,
-				new RescheduleAppointmentRequest(startAt, endAt))).isInstanceOf(AppointmentNotFoundException.class);
+				new RescheduleAppointmentRequest(startAt, endAt), TEST_NOTIFICATION_CONTEXT))
+				.isInstanceOf(AppointmentNotFoundException.class);
 
-		verifyNoInteractions(scheduleLockService);
+		verifyNoInteractions(scheduleLockService, outboxEventPublisher);
 	}
 
 	// ---------------------------------------------------------
@@ -326,23 +363,26 @@ class AppointmentServiceTests {
 				.thenAnswer(invocation -> invocation.getArgument(0));
 
 		var response = appointmentService.cancelAppointment(APPOINTMENT_ID,
-				new CancelAppointmentRequest("Patient requested cancellation"));
+				new CancelAppointmentRequest("Patient requested cancellation"), TEST_NOTIFICATION_CONTEXT);
 
 		assertThat(response.status()).isEqualTo(AppointmentStatus.CANCELLED);
 		assertThat(response.cancellationReason()).isEqualTo("Patient requested cancellation");
 		assertThat(response.cancelledAt()).isNotNull();
 
 		verify(scheduleLockService).acquireLocks(DOCTOR_ID, PATIENT_ID);
+
+		verify(outboxEventPublisher).publish(eq(OutboxEventType.APPOINTMENT_CANCELLED), eq(APPOINTMENT_ID),
+				any(AppointmentNotificationPayload.class));
 	}
 
 	@Test
 	void cancelAppointmentRejectsBlankCancellationReason() {
 
-		assertThatThrownBy(
-				() -> appointmentService.cancelAppointment(APPOINTMENT_ID, new CancelAppointmentRequest("   ")))
+		assertThatThrownBy(() -> appointmentService.cancelAppointment(APPOINTMENT_ID,
+				new CancelAppointmentRequest("   "), TEST_NOTIFICATION_CONTEXT))
 				.isInstanceOf(InvalidAppointmentRequestException.class);
 
-		verifyNoInteractions(appointmentRepository, scheduleLockService);
+		verifyNoInteractions(appointmentRepository, scheduleLockService, outboxEventPublisher);
 	}
 
 	@Test
@@ -355,11 +395,12 @@ class AppointmentServiceTests {
 		when(appointmentRepository.findByIdForUpdate(APPOINTMENT_ID)).thenReturn(Optional.of(appointment));
 
 		assertThatThrownBy(() -> appointmentService.cancelAppointment(APPOINTMENT_ID,
-				new CancelAppointmentRequest("Patient requested cancellation")))
+				new CancelAppointmentRequest("Patient requested cancellation"), TEST_NOTIFICATION_CONTEXT))
 				.isInstanceOf(InvalidAppointmentOperationException.class);
 
 		verify(scheduleLockService).acquireLocks(DOCTOR_ID, PATIENT_ID);
 		verify(appointmentRepository, never()).saveAndFlush(any(Appointment.class));
+		verifyNoInteractions(outboxEventPublisher);
 	}
 
 	// ---------------------------------------------------------
@@ -378,10 +419,15 @@ class AppointmentServiceTests {
 		when(appointmentRepository.saveAndFlush(any(Appointment.class)))
 				.thenAnswer(invocation -> invocation.getArgument(0));
 
-		var response = appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.CONFIRMED);
+		var response = appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.CONFIRMED,
+				TEST_NOTIFICATION_CONTEXT);
 
 		assertThat(response.status()).isEqualTo(AppointmentStatus.CONFIRMED);
+
 		verify(scheduleLockService).acquireLocks(DOCTOR_ID, PATIENT_ID);
+
+		verify(outboxEventPublisher, never()).publish(any(OutboxEventType.class), any(Long.class),
+				any(AppointmentNotificationPayload.class));
 	}
 
 	@Test
@@ -396,9 +442,35 @@ class AppointmentServiceTests {
 		when(appointmentRepository.saveAndFlush(any(Appointment.class)))
 				.thenAnswer(invocation -> invocation.getArgument(0));
 
-		var response = appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.COMPLETED);
+		var response = appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.COMPLETED,
+				TEST_NOTIFICATION_CONTEXT);
 
 		assertThat(response.status()).isEqualTo(AppointmentStatus.COMPLETED);
+
+		verify(outboxEventPublisher, never()).publish(any(OutboxEventType.class), any(Long.class),
+				any(AppointmentNotificationPayload.class));
+	}
+
+	@Test
+	void updateStatusFromScheduledToCancelledPublishesCancellationEvent() {
+
+		Appointment appointment = createAppointment(APPOINTMENT_ID, AppointmentStatus.SCHEDULED);
+
+		when(appointmentRepository.findById(APPOINTMENT_ID)).thenReturn(Optional.of(appointment));
+
+		when(appointmentRepository.findByIdForUpdate(APPOINTMENT_ID)).thenReturn(Optional.of(appointment));
+
+		when(appointmentRepository.saveAndFlush(any(Appointment.class)))
+				.thenAnswer(invocation -> invocation.getArgument(0));
+
+		var response = appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.CANCELLED,
+				TEST_NOTIFICATION_CONTEXT);
+
+		assertThat(response.status()).isEqualTo(AppointmentStatus.CANCELLED);
+		assertThat(response.cancelledAt()).isNotNull();
+
+		verify(outboxEventPublisher).publish(eq(OutboxEventType.APPOINTMENT_CANCELLED), eq(APPOINTMENT_ID),
+				any(AppointmentNotificationPayload.class));
 	}
 
 	@Test
@@ -410,12 +482,12 @@ class AppointmentServiceTests {
 
 		when(appointmentRepository.findByIdForUpdate(APPOINTMENT_ID)).thenReturn(Optional.of(appointment));
 
-		assertThatThrownBy(
-				() -> appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.CONFIRMED))
-				.isInstanceOf(InvalidAppointmentOperationException.class);
+		assertThatThrownBy(() -> appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.CONFIRMED,
+				TEST_NOTIFICATION_CONTEXT)).isInstanceOf(InvalidAppointmentOperationException.class);
 
 		verify(scheduleLockService).acquireLocks(DOCTOR_ID, PATIENT_ID);
 		verify(appointmentRepository, never()).saveAndFlush(any(Appointment.class));
+		verifyNoInteractions(outboxEventPublisher);
 	}
 
 	@Test
@@ -427,12 +499,12 @@ class AppointmentServiceTests {
 
 		when(appointmentRepository.findByIdForUpdate(APPOINTMENT_ID)).thenReturn(Optional.of(appointment));
 
-		assertThatThrownBy(
-				() -> appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.SCHEDULED))
-				.isInstanceOf(InvalidAppointmentOperationException.class);
+		assertThatThrownBy(() -> appointmentService.updateAppointmentStatus(APPOINTMENT_ID, AppointmentStatus.SCHEDULED,
+				TEST_NOTIFICATION_CONTEXT)).isInstanceOf(InvalidAppointmentOperationException.class);
 
 		verify(scheduleLockService).acquireLocks(DOCTOR_ID, PATIENT_ID);
 		verify(appointmentRepository, never()).saveAndFlush(any(Appointment.class));
+		verifyNoInteractions(outboxEventPublisher);
 	}
 
 	// ---------------------------------------------------------

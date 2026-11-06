@@ -1,4 +1,3 @@
-
 package com.medsync.appointment.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -21,6 +20,7 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 
+import com.medsync.appointment.dto.AppointmentNotificationContext;
 import com.medsync.appointment.dto.AppointmentResponse;
 import com.medsync.appointment.dto.CancelAppointmentRequest;
 import com.medsync.appointment.dto.CreateAppointmentRequest;
@@ -119,13 +119,13 @@ class AppointmentConcurrencyIntegrationTests {
 		Instant secondStart = firstEnd;
 		Instant secondEnd = secondStart.plus(Duration.ofMinutes(30));
 
-		AppointmentResponse first = appointmentService
-				.createAppointment(createRequest(patientOne, doctorId, firstStart, firstEnd), nextId());
+		AppointmentResponse first = appointmentService.createAppointment(
+				createRequest(patientOne, doctorId, firstStart, firstEnd), nextId(), context(patientOne, doctorId));
 
 		createdAppointmentIds.add(first.id());
 
-		AppointmentResponse second = appointmentService
-				.createAppointment(createRequest(patientTwo, doctorId, secondStart, secondEnd), nextId());
+		AppointmentResponse second = appointmentService.createAppointment(
+				createRequest(patientTwo, doctorId, secondStart, secondEnd), nextId(), context(patientTwo, doctorId));
 
 		createdAppointmentIds.add(second.id());
 
@@ -147,18 +147,18 @@ class AppointmentConcurrencyIntegrationTests {
 		Instant start = futureStart();
 		Instant end = start.plus(Duration.ofMinutes(30));
 
-		AppointmentResponse original = appointmentService
-				.createAppointment(createRequest(patientId, doctorId, start, end), nextId());
+		AppointmentResponse original = appointmentService.createAppointment(
+				createRequest(patientId, doctorId, start, end), nextId(), context(patientId, doctorId));
 
 		createdAppointmentIds.add(original.id());
 
 		AppointmentResponse cancelled = appointmentService.cancelAppointment(original.id(),
-				new CancelAppointmentRequest("Patient requested cancellation"));
+				new CancelAppointmentRequest("Patient requested cancellation"), context(patientId, doctorId));
 
 		assertThat(cancelled.status()).isEqualTo(AppointmentStatus.CANCELLED);
 
-		AppointmentResponse replacement = appointmentService
-				.createAppointment(createRequest(patientId, doctorId, start, end), nextId());
+		AppointmentResponse replacement = appointmentService.createAppointment(
+				createRequest(patientId, doctorId, start, end), nextId(), context(patientId, doctorId));
 
 		createdAppointmentIds.add(replacement.id());
 
@@ -228,7 +228,8 @@ class AppointmentConcurrencyIntegrationTests {
 				throw new IllegalStateException("Concurrent booking start signal timed out.");
 			}
 
-			AppointmentResponse response = appointmentService.createAppointment(request, nextId());
+			AppointmentResponse response = appointmentService.createAppointment(request, nextId(),
+					context(request.patientId(), request.doctorAuthUserId()));
 
 			return response.id();
 
@@ -251,6 +252,12 @@ class AppointmentConcurrencyIntegrationTests {
 	private CreateAppointmentRequest createRequest(Long patientId, Long doctorId, Instant start, Instant end) {
 
 		return new CreateAppointmentRequest(patientId, doctorId, start, end, "Integration test consultation");
+	}
+
+	private AppointmentNotificationContext context(Long patientId, Long doctorId) {
+
+		return new AppointmentNotificationContext(patientId, doctorId, "patient@example.com", "Aarav Sharma",
+				"Dr. Meera Nair");
 	}
 
 	private Instant futureStart() {
