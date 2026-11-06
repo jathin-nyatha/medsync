@@ -23,6 +23,7 @@ import lombok.Setter;
 @Entity
 @Table(name = "outbox_events", indexes = {
 		@Index(name = "idx_outbox_status_next_attempt", columnList = "status,next_attempt_at"),
+		@Index(name = "idx_outbox_status_locked_until", columnList = "status,locked_until"),
 		@Index(name = "idx_outbox_created_at", columnList = "created_at") })
 @Getter
 @Setter
@@ -55,6 +56,9 @@ public class OutboxEvent {
 
 	@Column(name = "next_attempt_at", nullable = false)
 	private Instant nextAttemptAt;
+
+	@Column(name = "locked_until")
+	private Instant lockedUntil;
 
 	@Column(name = "last_error", length = 2000)
 	private String lastError;
