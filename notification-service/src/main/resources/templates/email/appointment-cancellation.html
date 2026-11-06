@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Appointment Cancelled</title>
+</head>
+
+<body style="margin:0; padding:24px; background-color:#f4f6f8;
+             font-family:Arial,Helvetica,sans-serif; color:#263238;">
+
+	<div style="max-width:600px; margin:0 auto; background:#ffffff;
+            border-radius:8px; padding:32px;">
+
+		<h1 style="color:#b42318; margin-top:0;">
+			Appointment Cancelled
+		</h1>
+
+		<p>Hello <strong th:text="${patientName}">Patient</strong>,</p>
+
+		<p>Your appointment has been cancelled.</p>
+
+		<div style="background:#fff5f5; padding:20px; border-radius:6px;">
+			<p>
+				<strong>Doctor:</strong>
+				<span th:text="${doctorName}">Doctor Name</span>
+			</p>
+
+			<p>
+				<strong>Scheduled Date and Time:</strong>
+				<span th:text="${appointmentDateTime}">Appointment Date</span>
+			</p>
+
+			<p>
+				<strong>Appointment Reference:</strong>
+				<span th:text="${appointmentReference}">Reference</span>
+			</p>
+
+			<p th:if="${cancellationReason != null
+                    and !#strings.isEmpty(cancellationReason)}">
+				<strong>Cancellation Reason:</strong>
+				<span th:text="${cancellationReason}">Cancellation Reason</span>
+			</p>
+		</div>
+
+		<p>If you need another appointment, please contact the hospital.</p>
+
+		<p>Thank you for choosing MedSync.</p>
+
+		<hr style="border:none; border-top:1px solid #eeeeee;">
+
+		<p style="font-size:12px; color:#777777;">
+			This is an automated notification from MedSync.
+			Please do not reply to this email.
+		</p>
+
+	</div>
+</body>
+
+</html>

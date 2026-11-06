@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en" xmlns:th="http://www.thymeleaf.org">
+
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>Appointment Reminder</title>
+</head>
+
+<body style="margin:0; padding:24px; background-color:#f4f6f8;
+             font-family:Arial,Helvetica,sans-serif; color:#263238;">
+
+	<div style="max-width:600px; margin:0 auto; background:#ffffff;
+            border-radius:8px; padding:32px;">
+
+		<h1 style="color:#946200; margin-top:0;">
+			Appointment Reminder
+		</h1>
+
+		<p>Hello <strong th:text="${patientName}">Patient</strong>,</p>
+
+		<p>This is a reminder about your upcoming appointment.</p>
+
+		<div style="background:#fff9e8; padding:20px; border-radius:6px;">
+			<p>
+				<strong>Doctor:</strong>
+				<span th:text="${doctorName}">Doctor Name</span>
+			</p>
+
+			<p>
+				<strong>Date and Time:</strong>
+				<span th:text="${appointmentDateTime}">Appointment Date</span>
+			</p>
+
+			<p>
+				<strong>Reason:</strong>
+				<span th:text="${reason}">Appointment Reason</span>
+			</p>
+
+			<p>
+				<strong>Appointment Reference:</strong>
+				<span th:text="${appointmentReference}">Reference</span>
+			</p>
+		</div>
+
+		<p>Please make the necessary arrangements to attend your appointment.</p>
+
+		<p>Thank you for choosing MedSync.</p>
+
+		<hr style="border:none; border-top:1px solid #eeeeee;">
+
+		<p style="font-size:12px; color:#777777;">
+			This is an automated notification from MedSync.
+			Please do not reply to this email.
+		</p>
+
+	</div>
+</body>
+
+</html>
