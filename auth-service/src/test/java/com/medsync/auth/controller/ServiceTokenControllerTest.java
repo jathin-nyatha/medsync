@@ -1,4 +1,3 @@
-
 package com.medsync.auth.controller;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -70,7 +69,7 @@ class ServiceTokenControllerTest {
 
 		assertEquals(300L, response.getBody().expiresIn());
 
-		assertEquals("notifications:create users:email:read", response.getBody().scope());
+		assertEquals("notifications:create users:email:read patients:read doctors:read", response.getBody().scope());
 	}
 
 	@Test
@@ -97,7 +96,7 @@ class ServiceTokenControllerTest {
 		@SuppressWarnings("unchecked")
 		List<String> scopes = (List<String>) claims.get("scope");
 
-		assertEquals(List.of("notifications:create", "users:email:read"), scopes);
+		assertEquals(List.of("notifications:create", "users:email:read", "patients:read", "doctors:read"), scopes);
 
 		assertNotNull(claims.getIssuedAt());
 

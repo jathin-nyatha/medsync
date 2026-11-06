@@ -24,7 +24,8 @@ public class ServiceTokenController {
 
 	private static final String APPOINTMENT_SERVICE_CLIENT_ID = "appointment-service";
 
-	private static final List<String> APPOINTMENT_SERVICE_SCOPES = List.of("notifications:create", "users:email:read");
+	private static final List<String> APPOINTMENT_SERVICE_SCOPES = List.of("notifications:create", "users:email:read",
+			"patients:read", "doctors:read");
 
 	private final JwtService jwtService;
 	private final String configuredClientId;

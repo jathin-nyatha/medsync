@@ -64,7 +64,10 @@ public class DoctorController {
 
 	// 3. Get doctor by Auth Service user ID.
 	@GetMapping("/by-auth-user/{authUserId}")
-	@PreAuthorize("hasAnyRole('ADMIN', 'RECEPTIONIST')")
+	@PreAuthorize("""
+			hasAnyRole('ADMIN', 'RECEPTIONIST')
+			or @serviceTokenAuthorization.isAppointmentServiceWithScope(authentication.token)
+			""")
 	public ResponseEntity<DoctorResponse> getDoctorByAuthUserId(@PathVariable Long authUserId) {
 
 		Doctor doctor = doctorService.getDoctorByAuthUserId(authUserId);

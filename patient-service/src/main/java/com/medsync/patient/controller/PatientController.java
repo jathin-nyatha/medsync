@@ -1,4 +1,3 @@
-
 package com.medsync.patient.controller;
 
 import org.springframework.data.domain.Page;
@@ -45,7 +44,10 @@ public class PatientController {
 
 	// Retrieve a patient by Patient Service ID.
 	@GetMapping("/{patientId}")
-	@PreAuthorize("hasAnyRole('ADMIN', 'RECEPTIONIST', 'DOCTOR')")
+	@PreAuthorize("""
+			hasAnyRole('ADMIN', 'RECEPTIONIST', 'DOCTOR')
+			or @serviceTokenAuthorization.isAppointmentServiceWithScope(authentication.token)
+			""")
 	public ResponseEntity<PatientResponse> getPatientById(@PathVariable Long patientId) {
 
 		return ResponseEntity.ok(patientService.getPatientById(patientId));

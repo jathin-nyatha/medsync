@@ -1,4 +1,3 @@
-
 package com.medsync.appointment.client;
 
 import java.time.Duration;
@@ -18,7 +17,8 @@ import com.medsync.appointment.client.dto.ServiceTokenResponse;
 @Component
 public class ServiceTokenProvider {
 
-	private static final Set<String> REQUIRED_SCOPES = Set.of("users:email:read", "notifications:create");
+	private static final Set<String> REQUIRED_SCOPES = Set.of("users:email:read", "notifications:create",
+			"patients:read", "doctors:read");
 
 	private static final long MAX_REFRESH_SKEW_SECONDS = 30;
 
