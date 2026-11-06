@@ -1,9 +1,9 @@
+
 package com.medsync.appointment.service;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
-import org.springframework.web.client.HttpClientErrorException;
-import org.springframework.web.client.HttpServerErrorException;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClientException;
 
@@ -43,47 +43,71 @@ public class OutboxEventDeliveryService {
 		outboxEventStateService.markPublished(event);
 	}
 
-	private boolean isRetryable(Throwable failure) {
+	boolean isRetryable(Throwable failure) {
 
-		if (failure instanceof HttpClientErrorException clientError) {
+		HttpStatusCodeException httpFailure = findHttpStatusFailure(failure);
 
-			int statusCode = clientError.getStatusCode().value();
+		if (httpFailure != null) {
 
-			// Transient client-side conditions.
+			int statusCode = httpFailure.getStatusCode().value();
+
+			// These HTTP client errors can represent temporary conditions.
 			if (statusCode == HttpStatus.REQUEST_TIMEOUT.value()
 					|| statusCode == HttpStatus.TOO_MANY_REQUESTS.value()) {
 				return true;
 			}
 
-			// Other 4xx responses, including 400 and 409,
-			// are treated as permanent failures by default.
-			return false;
-		}
+			// Retry server-side HTTP failures.
+			if (statusCode >= 500 && statusCode <= 599) {
+				return true;
+			}
 
-		if (failure instanceof HttpServerErrorException || failure instanceof ResourceAccessException
-				|| failure instanceof RestClientException) {
-			return true;
+			// Other 4xx responses are permanent by default.
+			if (statusCode >= 400 && statusCode <= 499) {
+				return false;
+			}
 		}
 
 		if (failure instanceof IllegalArgumentException) {
-			// Invalid payload or invalid idempotency key.
+			// Invalid payload or idempotency key.
 			return false;
 		}
 
 		if (failure instanceof IllegalStateException) {
-			// Service-token network failures may be wrapped by ServiceTokenProvider.
+			// Token configuration/validation errors are permanent.
+			// Wrapped HTTP and network errors were classified above.
 			return hasRestClientCause(failure);
+		}
+
+		if (failure instanceof ResourceAccessException || failure instanceof RestClientException) {
+			return true;
 		}
 
 		// Unexpected runtime failures receive bounded retries.
 		return true;
 	}
 
+	private HttpStatusCodeException findHttpStatusFailure(Throwable failure) {
+
+		Throwable current = failure;
+
+		while (current != null) {
+
+			if (current instanceof HttpStatusCodeException httpFailure) {
+				return httpFailure;
+			}
+
+			current = current.getCause();
+		}
+
+		return null;
+	}
+
 	private boolean hasRestClientCause(Throwable failure) {
 
 		Throwable current = failure.getCause();
 
-		while (current != null && current != failure) {
+		while (current != null) {
 
 			if (current instanceof RestClientException) {
 				return true;

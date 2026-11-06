@@ -1,6 +1,7 @@
 
 package com.medsync.appointment.service;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -43,6 +44,7 @@ class OutboxEventDeliveryServiceTests {
 
 	@BeforeEach
 	void setUp() {
+
 		deliveryService = new OutboxEventDeliveryService(notificationClient, outboxEventStateService, properties);
 
 		event = mock(OutboxEvent.class);
@@ -125,6 +127,59 @@ class OutboxEventDeliveryServiceTests {
 	}
 
 	@Test
+	void deliverDoesNotRetryWhenAuthServiceRejectsCredentials() {
+
+		HttpClientErrorException unauthorized = createClientError(HttpStatus.UNAUTHORIZED);
+
+		IllegalStateException failure = new IllegalStateException("Unable to acquire Appointment Service token",
+				unauthorized);
+
+		assertFailureHandled(failure, false);
+	}
+
+	@Test
+	void deliverDoesNotRetryWhenAuthServiceRejectsAuthorization() {
+
+		HttpClientErrorException forbidden = createClientError(HttpStatus.FORBIDDEN);
+
+		IllegalStateException failure = new IllegalStateException("Unable to acquire Appointment Service token",
+				forbidden);
+
+		assertFailureHandled(failure, false);
+	}
+
+	@Test
+	void deliverRetriesWhenAuthServiceReturns429() {
+
+		HttpClientErrorException tooManyRequests = createClientError(HttpStatus.TOO_MANY_REQUESTS);
+
+		IllegalStateException failure = new IllegalStateException("Unable to acquire Appointment Service token",
+				tooManyRequests);
+
+		assertFailureHandled(failure, true);
+	}
+
+	@Test
+	void deliverRetriesWhenAuthServiceReturns503() {
+
+		HttpServerErrorException unavailable = new HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE);
+
+		IllegalStateException failure = new IllegalStateException("Unable to acquire Appointment Service token",
+				unavailable);
+
+		assertFailureHandled(failure, true);
+	}
+
+	@Test
+	void deliverDoesNotRetryWhenServiceTokenResponseIsInvalid() {
+
+		IllegalStateException failure = new IllegalStateException(
+				"Auth Service returned an invalid service-token response.");
+
+		assertFailureHandled(failure, false);
+	}
+
+	@Test
 	void deliverDoesNotRetryWhenServiceTokenFailureIsNotNetworkRelated() {
 
 		IllegalStateException failure = new IllegalStateException("Invalid service credentials");
@@ -138,6 +193,17 @@ class OutboxEventDeliveryServiceTests {
 		RuntimeException failure = new RuntimeException("Unexpected delivery failure");
 
 		assertFailureHandled(failure, true);
+	}
+
+	@Test
+	void isRetryableFindsHttpFailureNestedInsideAnotherCause() {
+
+		HttpClientErrorException unauthorized = createClientError(HttpStatus.UNAUTHORIZED);
+
+		RuntimeException wrappedFailure = new RuntimeException("Outer failure",
+				new IllegalStateException("Token acquisition failed", unauthorized));
+
+		assertThat(deliveryService.isRetryable(wrappedFailure)).isFalse();
 	}
 
 	private void assertRetryableHttpFailure(HttpStatus status) {
