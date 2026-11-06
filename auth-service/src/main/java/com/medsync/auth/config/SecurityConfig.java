@@ -7,6 +7,7 @@ import org.springframework.http.HttpMethod;
 import org.springframework.security.authentication.AuthenticationManager;
 import org.springframework.security.authentication.ProviderManager;
 import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
+import org.springframework.security.authorization.AuthorizationDecision;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.core.userdetails.UserDetailsService;
@@ -27,19 +28,44 @@ public class SecurityConfig {
 
 				.authorizeHttpRequests(authorize -> authorize
 
-						// Public endpoints
+						// Public endpoints.
 						.requestMatchers(HttpMethod.POST, "/api/auth/login").permitAll()
+
 						.requestMatchers(HttpMethod.POST, "/api/auth/register/patient").permitAll()
+
+						.requestMatchers(HttpMethod.POST, "/api/auth/service-token").permitAll()
+
 						.requestMatchers("/actuator/health").permitAll()
 
-						// Administrator-only endpoints
-						.requestMatchers("/api/auth/register").hasRole("ADMIN").requestMatchers("/api/auth/admin")
-						.hasRole("ADMIN").requestMatchers("/api/internal/**").hasRole("ADMIN")
+						// Email lookup:
+						// ADMIN, RECEPTIONIST, or authorized service.
+						.requestMatchers(HttpMethod.GET, "/api/internal/users/*/email")
+						.access((authentication, context) -> {
 
-						// Authenticated endpoints
+							var authorities = authentication.get().getAuthorities();
+
+							boolean allowed = authorities.stream().anyMatch(authority -> {
+
+								String name = authority.getAuthority();
+
+								return name.equals("ROLE_ADMIN") || name.equals("ROLE_RECEPTIONIST")
+										|| name.equals("SCOPE_users:email:read");
+							});
+
+							return new AuthorizationDecision(allowed);
+						})
+
+						// Administrator-only endpoints.
+						.requestMatchers("/api/auth/register").hasRole("ADMIN")
+
+						.requestMatchers("/api/auth/admin").hasRole("ADMIN")
+
+						// Other internal endpoints remain ADMIN-only.
+						.requestMatchers("/api/internal/**").hasRole("ADMIN")
+
+						// Authenticated endpoints.
 						.requestMatchers("/api/auth/protected").authenticated()
 
-						// Everything else requires authentication
 						.anyRequest().authenticated())
 
 				.oauth2ResourceServer(
