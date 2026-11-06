@@ -41,10 +41,10 @@ public class NotificationController {
 
 	@PostMapping
 	@PreAuthorize("""
-			hasAnyRole(
-			    'ADMIN',
-			    'RECEPTIONIST',
-			    'APPOINTMENT_SERVICE'
+			hasAnyAuthority('ROLE_ADMIN', 'ROLE_RECEPTIONIST')
+			or (
+			    hasAuthority('SCOPE_notifications:create')
+			    and @serviceTokenAuthorization.isValidNotificationServiceToken(authentication.token)
 			)
 			""")
 	public ResponseEntity<NotificationResponse> createNotification(
