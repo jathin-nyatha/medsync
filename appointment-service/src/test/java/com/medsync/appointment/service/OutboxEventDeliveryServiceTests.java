@@ -1,4 +1,3 @@
-
 package com.medsync.appointment.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -9,6 +8,7 @@ import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,6 +24,7 @@ import org.springframework.web.client.RestClientException;
 
 import com.medsync.appointment.client.NotificationClient;
 import com.medsync.appointment.entity.OutboxEvent;
+import com.medsync.appointment.observability.OutboxMetrics;
 import com.medsync.appointment.properties.OutboxDispatcherProperties;
 
 @ExtendWith(MockitoExtension.class)
@@ -38,55 +39,53 @@ class OutboxEventDeliveryServiceTests {
 	@Mock
 	private OutboxDispatcherProperties properties;
 
+	@Mock
+	private OutboxMetrics outboxMetrics;
+
 	private OutboxEventDeliveryService deliveryService;
 
 	private OutboxEvent event;
 
 	@BeforeEach
 	void setUp() {
-
-		deliveryService = new OutboxEventDeliveryService(notificationClient, outboxEventStateService, properties);
+		deliveryService = new OutboxEventDeliveryService(notificationClient, outboxEventStateService, properties,
+				outboxMetrics);
 
 		event = mock(OutboxEvent.class);
 	}
 
 	@Test
 	void deliverMarksEventPublishedWhenNotificationSucceeds() {
-
 		deliveryService.deliver(event);
 
 		verify(notificationClient).createNotification(event);
 		verify(outboxEventStateService).markPublished(event);
+		verify(outboxMetrics).recordDeliveryDuration(org.mockito.ArgumentMatchers.any(Duration.class));
 		verifyNoMoreInteractions(outboxEventStateService);
 	}
 
 	@Test
 	void deliverRetriesWhenNotificationServiceReturns408() {
-
 		assertRetryableHttpFailure(HttpStatus.REQUEST_TIMEOUT);
 	}
 
 	@Test
 	void deliverRetriesWhenNotificationServiceReturns429() {
-
 		assertRetryableHttpFailure(HttpStatus.TOO_MANY_REQUESTS);
 	}
 
 	@Test
 	void deliverDoesNotRetryWhenNotificationServiceReturns400() {
-
 		assertPermanentHttpFailure(HttpStatus.BAD_REQUEST);
 	}
 
 	@Test
 	void deliverDoesNotRetryWhenNotificationServiceReturns409() {
-
 		assertPermanentHttpFailure(HttpStatus.CONFLICT);
 	}
 
 	@Test
 	void deliverRetriesWhenNotificationServiceReturns503() {
-
 		HttpServerErrorException failure = new HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE);
 
 		assertFailureHandled(failure, true);
@@ -94,7 +93,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverRetriesWhenNetworkConnectionFails() {
-
 		ResourceAccessException failure = new ResourceAccessException("Notification Service connection failed",
 				new IOException("Connection refused"));
 
@@ -103,7 +101,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverRetriesWhenRestClientFails() {
-
 		RestClientException failure = new RestClientException("Unexpected REST client failure");
 
 		assertFailureHandled(failure, true);
@@ -111,7 +108,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverDoesNotRetryWhenPayloadIsInvalid() {
-
 		IllegalArgumentException failure = new IllegalArgumentException("Invalid notification payload");
 
 		assertFailureHandled(failure, false);
@@ -119,7 +115,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverRetriesWhenServiceTokenFailureHasNetworkCause() {
-
 		IllegalStateException failure = new IllegalStateException("Unable to obtain service token",
 				new ResourceAccessException("Auth Service unavailable"));
 
@@ -128,7 +123,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverDoesNotRetryWhenAuthServiceRejectsCredentials() {
-
 		HttpClientErrorException unauthorized = createClientError(HttpStatus.UNAUTHORIZED);
 
 		IllegalStateException failure = new IllegalStateException("Unable to acquire Appointment Service token",
@@ -139,7 +133,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverDoesNotRetryWhenAuthServiceRejectsAuthorization() {
-
 		HttpClientErrorException forbidden = createClientError(HttpStatus.FORBIDDEN);
 
 		IllegalStateException failure = new IllegalStateException("Unable to acquire Appointment Service token",
@@ -150,7 +143,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverRetriesWhenAuthServiceReturns429() {
-
 		HttpClientErrorException tooManyRequests = createClientError(HttpStatus.TOO_MANY_REQUESTS);
 
 		IllegalStateException failure = new IllegalStateException("Unable to acquire Appointment Service token",
@@ -161,7 +153,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverRetriesWhenAuthServiceReturns503() {
-
 		HttpServerErrorException unavailable = new HttpServerErrorException(HttpStatus.SERVICE_UNAVAILABLE);
 
 		IllegalStateException failure = new IllegalStateException("Unable to acquire Appointment Service token",
@@ -172,7 +163,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverDoesNotRetryWhenServiceTokenResponseIsInvalid() {
-
 		IllegalStateException failure = new IllegalStateException(
 				"Auth Service returned an invalid service-token response.");
 
@@ -181,7 +171,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverDoesNotRetryWhenServiceTokenFailureIsNotNetworkRelated() {
-
 		IllegalStateException failure = new IllegalStateException("Invalid service credentials");
 
 		assertFailureHandled(failure, false);
@@ -189,7 +178,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void deliverRetriesUnexpectedRuntimeFailures() {
-
 		RuntimeException failure = new RuntimeException("Unexpected delivery failure");
 
 		assertFailureHandled(failure, true);
@@ -197,7 +185,6 @@ class OutboxEventDeliveryServiceTests {
 
 	@Test
 	void isRetryableFindsHttpFailureNestedInsideAnotherCause() {
-
 		HttpClientErrorException unauthorized = createClientError(HttpStatus.UNAUTHORIZED);
 
 		RuntimeException wrappedFailure = new RuntimeException("Outer failure",
@@ -207,23 +194,19 @@ class OutboxEventDeliveryServiceTests {
 	}
 
 	private void assertRetryableHttpFailure(HttpStatus status) {
-
 		assertFailureHandled(createClientError(status), true);
 	}
 
 	private void assertPermanentHttpFailure(HttpStatus status) {
-
 		assertFailureHandled(createClientError(status), false);
 	}
 
 	private HttpClientErrorException createClientError(HttpStatus status) {
-
 		return HttpClientErrorException.create(status, status.getReasonPhrase(), HttpHeaders.EMPTY, new byte[0],
 				StandardCharsets.UTF_8);
 	}
 
 	private void assertFailureHandled(RuntimeException failure, boolean retryable) {
-
 		doThrow(failure).when(notificationClient).createNotification(event);
 
 		deliveryService.deliver(event);
@@ -231,6 +214,8 @@ class OutboxEventDeliveryServiceTests {
 		verify(notificationClient).createNotification(event);
 
 		verify(outboxEventStateService).recordFailure(event, failure, retryable, properties);
+
+		verify(outboxMetrics).recordDeliveryDuration(org.mockito.ArgumentMatchers.any(Duration.class));
 
 		verifyNoMoreInteractions(outboxEventStateService);
 	}

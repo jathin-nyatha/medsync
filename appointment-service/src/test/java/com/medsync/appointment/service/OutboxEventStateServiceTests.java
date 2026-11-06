@@ -21,6 +21,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 
 import com.medsync.appointment.entity.OutboxEvent;
 import com.medsync.appointment.entity.OutboxEventType;
+import com.medsync.appointment.observability.OutboxMetrics;
 import com.medsync.appointment.properties.OutboxDispatcherProperties;
 import com.medsync.appointment.repository.OutboxEventRepository;
 
@@ -28,15 +29,15 @@ import com.medsync.appointment.repository.OutboxEventRepository;
 class OutboxEventStateServiceTests {
 
 	private static final Long EVENT_ID = 1001L;
-
 	private static final String EVENT_REFERENCE = "evt-12345678";
-
 	private static final Long APPOINTMENT_ID = 501L;
-
 	private static final Long CLAIMED_VERSION = 3L;
 
 	@Mock
 	private OutboxEventRepository outboxEventRepository;
+
+	@Mock
+	private OutboxMetrics outboxMetrics;
 
 	@InjectMocks
 	private OutboxEventStateService outboxEventStateService;
@@ -45,9 +46,7 @@ class OutboxEventStateServiceTests {
 
 	@BeforeEach
 	void setUp() {
-
 		properties = new OutboxDispatcherProperties();
-
 		properties.setMaxAttempts(5);
 		properties.setInitialRetryDelay(Duration.ofSeconds(5));
 		properties.setMaxRetryDelay(Duration.ofSeconds(300));
@@ -55,7 +54,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void markPublishedUpdatesClaimedEvent() {
-
 		OutboxEvent event = createClaimedEvent(1);
 
 		when(outboxEventRepository.markPublishedIfClaimed(eq(EVENT_ID), eq(CLAIMED_VERSION),
@@ -64,6 +62,7 @@ class OutboxEventStateServiceTests {
 		boolean result = outboxEventStateService.markPublished(event);
 
 		assertThat(result).isTrue();
+		verify(outboxMetrics).recordDelivery("success");
 
 		ArgumentCaptor<Instant> processedAtCaptor = ArgumentCaptor.forClass(Instant.class);
 
@@ -75,7 +74,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void markPublishedReturnsFalseWhenClaimIsNoLongerCurrent() {
-
 		OutboxEvent event = createClaimedEvent(1);
 
 		when(outboxEventRepository.markPublishedIfClaimed(eq(EVENT_ID), eq(CLAIMED_VERSION),
@@ -84,13 +82,12 @@ class OutboxEventStateServiceTests {
 		boolean result = outboxEventStateService.markPublished(event);
 
 		assertThat(result).isFalse();
+		verify(outboxMetrics, never()).recordDelivery(org.mockito.ArgumentMatchers.anyString());
 	}
 
 	@Test
 	void recordFailureSchedulesFirstRetryAfterFiveSeconds() {
-
 		OutboxEvent event = createClaimedEvent(1);
-
 		Instant beforeFailure = Instant.now();
 
 		when(outboxEventRepository.rescheduleIfClaimed(eq(EVENT_ID), eq(CLAIMED_VERSION),
@@ -103,6 +100,7 @@ class OutboxEventStateServiceTests {
 		Instant afterFailure = Instant.now();
 
 		assertThat(result).isTrue();
+		verify(outboxMetrics).recordDelivery("retry");
 
 		ArgumentCaptor<Instant> retryTimeCaptor = ArgumentCaptor.forClass(Instant.class);
 
@@ -114,9 +112,7 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void recordFailureUsesExponentialBackoffForSecondAttempt() {
-
 		OutboxEvent event = createClaimedEvent(2);
-
 		Instant beforeFailure = Instant.now();
 
 		when(outboxEventRepository.rescheduleIfClaimed(eq(EVENT_ID), eq(CLAIMED_VERSION),
@@ -140,7 +136,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void recordFailureCapsRetryDelayAtConfiguredMaximum() {
-
 		OutboxEvent event = createClaimedEvent(10);
 
 		properties.setMaxAttempts(15);
@@ -170,7 +165,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void recordFailureMarksEventFailedWhenMaximumAttemptsReached() {
-
 		OutboxEvent event = createClaimedEvent(5);
 
 		when(outboxEventRepository.markFailedIfClaimed(EVENT_ID, CLAIMED_VERSION,
@@ -180,6 +174,7 @@ class OutboxEventStateServiceTests {
 				new RuntimeException("Notification Service unavailable"), true, properties);
 
 		assertThat(result).isTrue();
+		verify(outboxMetrics).recordDelivery("permanent_failure");
 
 		verify(outboxEventRepository).markFailedIfClaimed(EVENT_ID, CLAIMED_VERSION,
 				"RuntimeException: Notification Service unavailable");
@@ -191,7 +186,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void recordFailureMarksEventFailedWhenFailureIsPermanent() {
-
 		OutboxEvent event = createClaimedEvent(1);
 
 		when(outboxEventRepository.markFailedIfClaimed(EVENT_ID, CLAIMED_VERSION,
@@ -201,6 +195,7 @@ class OutboxEventStateServiceTests {
 				new IllegalArgumentException("Invalid notification payload"), false, properties);
 
 		assertThat(result).isTrue();
+		verify(outboxMetrics).recordDelivery("permanent_failure");
 
 		verify(outboxEventRepository).markFailedIfClaimed(EVENT_ID, CLAIMED_VERSION,
 				"IllegalArgumentException: Invalid notification payload");
@@ -212,7 +207,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void recordFailureReturnsFalseWhenClaimIsNoLongerCurrent() {
-
 		OutboxEvent event = createClaimedEvent(1);
 
 		when(outboxEventRepository.rescheduleIfClaimed(eq(EVENT_ID), eq(CLAIMED_VERSION),
@@ -223,13 +217,12 @@ class OutboxEventStateServiceTests {
 				properties);
 
 		assertThat(result).isFalse();
+		verify(outboxMetrics, never()).recordDelivery(org.mockito.ArgumentMatchers.anyString());
 	}
 
 	@Test
 	void recordFailureTruncatesErrorMessageTo2000Characters() {
-
 		OutboxEvent event = createClaimedEvent(1);
-
 		String longMessage = "x".repeat(2500);
 
 		when(outboxEventRepository.markFailedIfClaimed(eq(EVENT_ID), eq(CLAIMED_VERSION),
@@ -249,7 +242,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void markPublishedRejectsNullEvent() {
-
 		assertThatThrownBy(() -> outboxEventStateService.markPublished(null))
 				.isInstanceOf(IllegalArgumentException.class).hasMessageContaining("persisted claimed outbox event");
 
@@ -258,7 +250,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void markPublishedRejectsEventWithoutVersion() {
-
 		OutboxEvent event = createClaimedEvent(1);
 		event.setVersion(null);
 
@@ -270,7 +261,6 @@ class OutboxEventStateServiceTests {
 
 	@Test
 	void recordFailureRejectsNullFailure() {
-
 		OutboxEvent event = createClaimedEvent(1);
 
 		assertThatThrownBy(() -> outboxEventStateService.recordFailure(event, null, true, properties))
@@ -280,7 +270,6 @@ class OutboxEventStateServiceTests {
 	}
 
 	private OutboxEvent createClaimedEvent(int attempts) {
-
 		OutboxEvent event = new OutboxEvent(EVENT_REFERENCE, OutboxEventType.APPOINTMENT_CONFIRMATION, APPOINTMENT_ID,
 				"{}");
 

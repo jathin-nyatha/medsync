@@ -1,4 +1,3 @@
-
 package com.medsync.appointment.config;
 
 import java.io.InputStream;
