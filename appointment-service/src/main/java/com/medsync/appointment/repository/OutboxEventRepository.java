@@ -43,9 +43,8 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 	List<Long> findEligibleEventIds(@Param("currentTime") Instant currentTime, @Param("batchSize") int batchSize);
 
 	/**
-	 * Atomically claims an eligible event.
-	 *
-	 * Attempts increments once per successful claim.
+	 * Atomically claims an eligible event. Attempts increments once per successful
+	 * claim.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -77,12 +76,8 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("leaseUntil") Instant leaseUntil);
 
 	/**
-	 * Renews an active lease only if the worker still owns the expected version.
-	 *
-	 * The expiry check uses the database UTC clock to avoid timezone conversion
-	 * differences between Java Instant and MySQL DATETIME(6).
-	 *
-	 * An expired lease cannot be renewed.
+	 * Renews an active lease only if the worker still owns the expected version. An
+	 * expired lease cannot be renewed.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -102,8 +97,7 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("leaseUntil") Instant leaseUntil);
 
 	/**
-	 * Marks an event as published only if it is still owned by the worker that
-	 * claimed the expected version.
+	 * Marks an event as published only if its claim is still current.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -124,7 +118,7 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("processedAt") Instant processedAt);
 
 	/**
-	 * Reschedules an event for retry only if the claim is still current.
+	 * Reschedules an event only if its claim is still current.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -146,7 +140,7 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("nextAttemptAt") Instant nextAttemptAt, @Param("lastError") String lastError);
 
 	/**
-	 * Marks an event as permanently failed only if the claim is current.
+	 * Marks an event as permanently failed only if its claim is current.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -165,6 +159,31 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			""", nativeQuery = true)
 	int markFailedIfClaimed(@Param("eventId") Long eventId, @Param("expectedVersion") Long expectedVersion,
 			@Param("lastError") String lastError);
+
+	/**
+	 * Requeues a permanently failed event for an explicit administrative replay.
+	 *
+	 * The event identity and payload are deliberately preserved. The status
+	 * predicate makes this operation safe against concurrent replay requests and
+	 * prevents replay of PENDING, PROCESSING, or PUBLISHED events.
+	 */
+	@Modifying(flushAutomatically = true, clearAutomatically = true)
+	@Query(value = """
+			UPDATE outbox_events
+			SET
+			    status = 'PENDING',
+			    attempts = 0,
+			    next_attempt_at = UTC_TIMESTAMP(6),
+			    locked_until = NULL,
+			    last_error = NULL,
+			    processed_at = NULL,
+			    updated_at = UTC_TIMESTAMP(6),
+			    version = version + 1
+			WHERE
+			    event_id = :eventId
+			    AND status = 'FAILED'
+			""", nativeQuery = true)
+	int replayFailedEvent(@Param("eventId") String eventId);
 
 	Optional<OutboxEvent> findByEventId(String eventId);
 
