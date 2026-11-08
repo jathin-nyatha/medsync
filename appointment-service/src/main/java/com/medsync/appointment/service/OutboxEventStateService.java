@@ -3,7 +3,6 @@ package com.medsync.appointment.service;
 
 import java.time.Duration;
 import java.time.Instant;
-import java.time.temporal.ChronoUnit;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,6 +22,7 @@ import com.medsync.appointment.repository.OutboxEventRepository;
 public class OutboxEventStateService {
 
 	private static final Logger log = LoggerFactory.getLogger(OutboxEventStateService.class);
+
 	private static final int MAX_ERROR_LENGTH = 2000;
 
 	private final OutboxEventRepository outboxEventRepository;
@@ -36,9 +36,12 @@ public class OutboxEventStateService {
 	/**
 	 * Extends the lease for an event immediately before delivery.
 	 *
-	 * The database verifies that the lease is still active using its own UTC clock.
-	 * The detached event's version and lease timestamp are updated only after a
-	 * successful database update.
+	 * The update succeeds only while the current claim is active and its version is
+	 * unchanged.
+	 *
+	 * The database calculates the new lease expiration using UTC time. On success,
+	 * the detached event's version and lease expiration are synchronized with the
+	 * database.
 	 */
 	@Transactional(propagation = Propagation.REQUIRES_NEW)
 	public boolean renewLease(OutboxEvent claimedEvent, Duration leaseDuration) {
@@ -49,15 +52,16 @@ public class OutboxEventStateService {
 			throw new IllegalArgumentException("Lease duration must be positive.");
 		}
 
-		/*
-		 * MySQL DATETIME(6) supports microsecond precision. Truncating here keeps the
-		 * in-memory value consistent with the timestamp precision persisted by MySQL.
-		 */
-		Instant leaseUntil = Instant.now().plus(leaseDuration).truncatedTo(ChronoUnit.MICROS);
+		long leaseDurationMicros = leaseDuration.toNanos() / 1_000;
+
+		if (leaseDurationMicros < 1) {
+			throw new IllegalArgumentException("Lease duration must be at least one microsecond.");
+		}
 
 		Long expectedVersion = claimedEvent.getVersion();
 
-		int updatedRows = outboxEventRepository.renewLeaseIfClaimed(claimedEvent.getId(), expectedVersion, leaseUntil);
+		int updatedRows = outboxEventRepository.renewLeaseIfClaimed(claimedEvent.getId(), expectedVersion,
+				leaseDurationMicros);
 
 		if (updatedRows == 0) {
 			log.warn("Could not renew lease for outbox event {} because its claim is expired or no longer current.",
@@ -65,10 +69,16 @@ public class OutboxEventStateService {
 			return false;
 		}
 
-		claimedEvent.setVersion(expectedVersion + 1);
-		claimedEvent.setLockedUntil(leaseUntil);
+		Instant renewedLeaseUntil = outboxEventRepository.findLockedUntilById(claimedEvent.getId());
 
-		log.debug("Renewed lease for outbox event {} until {}.", claimedEvent.getEventId(), leaseUntil);
+		if (renewedLeaseUntil == null) {
+			throw new IllegalStateException("Renewed outbox event lease expiration could not be retrieved.");
+		}
+
+		claimedEvent.setVersion(expectedVersion + 1);
+		claimedEvent.setLockedUntil(renewedLeaseUntil);
+
+		log.debug("Renewed lease for outbox event {} until {}.", claimedEvent.getEventId(), renewedLeaseUntil);
 
 		return true;
 	}
@@ -103,6 +113,7 @@ public class OutboxEventStateService {
 		}
 
 		String error = describeFailure(failure);
+
 		boolean attemptsExhausted = claimedEvent.getAttempts() >= properties.getMaxAttempts();
 
 		if (!retryable || attemptsExhausted) {

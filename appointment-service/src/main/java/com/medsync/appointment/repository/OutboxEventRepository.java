@@ -18,10 +18,37 @@ import com.medsync.appointment.entity.OutboxEventStatus;
 public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> {
 
 	/**
-	 * Finds candidate events. This query does not claim them.
+	 * Moves expired PROCESSING events to FAILED when they have exhausted the
+	 * configured number of delivery attempts.
 	 *
-	 * Eligible events: 1. PENDING events whose retry time has arrived. 2.
-	 * PROCESSING events whose lease has expired.
+	 * This operation is atomic and safe to execute from multiple workers.
+	 */
+	@Modifying(flushAutomatically = true, clearAutomatically = true)
+	@Query(value = """
+			UPDATE outbox_events
+			SET
+			    status = 'FAILED',
+			    locked_until = NULL,
+			    last_error = 'Lease expired after maximum delivery attempts',
+			    processed_at = NULL,
+			    updated_at = UTC_TIMESTAMP(6),
+			    version = version + 1
+			WHERE
+			    status = 'PROCESSING'
+			    AND locked_until IS NOT NULL
+			    AND locked_until <= UTC_TIMESTAMP(6)
+			    AND attempts >= :maxAttempts
+			""", nativeQuery = true)
+	int failExpiredExhaustedEvents(@Param("maxAttempts") int maxAttempts);
+
+	/**
+	 * Finds eligible events without claiming them.
+	 *
+	 * Eligible events: 1. PENDING events whose retry time has arrived and which
+	 * have attempts remaining. 2. PROCESSING events whose lease has expired and
+	 * which have attempts remaining.
+	 *
+	 * Database UTC time is authoritative for eligibility.
 	 */
 	@Query(value = """
 			SELECT id
@@ -29,22 +56,29 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			WHERE
 			    (
 			        status = 'PENDING'
-			        AND next_attempt_at <= :currentTime
+			        AND next_attempt_at <= UTC_TIMESTAMP(6)
+			        AND attempts < :maxAttempts
 			    )
 			    OR
 			    (
 			        status = 'PROCESSING'
 			        AND locked_until IS NOT NULL
-			        AND locked_until <= :currentTime
+			        AND locked_until <= UTC_TIMESTAMP(6)
+			        AND attempts < :maxAttempts
 			    )
 			ORDER BY COALESCE(next_attempt_at, locked_until, created_at), id
 			LIMIT :batchSize
 			""", nativeQuery = true)
-	List<Long> findEligibleEventIds(@Param("currentTime") Instant currentTime, @Param("batchSize") int batchSize);
+	List<Long> findEligibleEventIds(@Param("maxAttempts") int maxAttempts, @Param("batchSize") int batchSize);
 
 	/**
-	 * Atomically claims an eligible event. Attempts increments once per successful
-	 * claim.
+	 * Atomically claims an eligible event.
+	 *
+	 * Attempts increments exactly once per successful claim. The attempt limit is
+	 * checked again here to protect against concurrent workers that selected the
+	 * same candidate.
+	 *
+	 * Lease expiration and creation use database UTC time.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -52,38 +86,47 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			SET
 			    status = 'PROCESSING',
 			    attempts = attempts + 1,
-			    locked_until = :leaseUntil,
+			    locked_until = DATE_ADD(
+			        UTC_TIMESTAMP(6),
+			        INTERVAL :leaseDurationMicros MICROSECOND
+			    ),
 			    last_error = NULL,
 			    updated_at = UTC_TIMESTAMP(6),
 			    version = version + 1
 			WHERE
 			    id = :eventId
+			    AND attempts < :maxAttempts
 			    AND
 			    (
 			        (
 			            status = 'PENDING'
-			            AND next_attempt_at <= :currentTime
+			            AND next_attempt_at <= UTC_TIMESTAMP(6)
 			        )
 			        OR
 			        (
 			            status = 'PROCESSING'
 			            AND locked_until IS NOT NULL
-			            AND locked_until <= :currentTime
+			            AND locked_until <= UTC_TIMESTAMP(6)
 			        )
 			    )
 			""", nativeQuery = true)
-	int claimIfEligible(@Param("eventId") Long eventId, @Param("currentTime") Instant currentTime,
-			@Param("leaseUntil") Instant leaseUntil);
+	int claimIfEligible(@Param("eventId") Long eventId, @Param("maxAttempts") int maxAttempts,
+			@Param("leaseDurationMicros") long leaseDurationMicros);
 
 	/**
-	 * Renews an active lease only if the worker still owns the expected version. An
-	 * expired lease cannot be renewed.
+	 * Renews an active lease only if the worker still owns the expected version.
+	 *
+	 * An expired lease cannot be renewed. This prevents a worker from resuming
+	 * delivery after another worker becomes eligible to reclaim it.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
 			UPDATE outbox_events
 			SET
-			    locked_until = :leaseUntil,
+			    locked_until = DATE_ADD(
+			        UTC_TIMESTAMP(6),
+			        INTERVAL :leaseDurationMicros MICROSECOND
+			    ),
 			    updated_at = UTC_TIMESTAMP(6),
 			    version = version + 1
 			WHERE
@@ -94,10 +137,17 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			    AND locked_until > UTC_TIMESTAMP(6)
 			""", nativeQuery = true)
 	int renewLeaseIfClaimed(@Param("eventId") Long eventId, @Param("expectedVersion") Long expectedVersion,
-			@Param("leaseUntil") Instant leaseUntil);
+			@Param("leaseDurationMicros") long leaseDurationMicros);
 
 	/**
-	 * Marks an event as published only if its claim is still current.
+	 * Retrieves the database-calculated lease expiration after renewal.
+	 */
+	@Query("SELECT event.lockedUntil FROM OutboxEvent event WHERE event.id = :eventId")
+	Instant findLockedUntilById(@Param("eventId") Long eventId);
+
+	/**
+	 * Marks an event as published only if it is still owned by the worker that
+	 * claimed the expected version.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -118,7 +168,7 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("processedAt") Instant processedAt);
 
 	/**
-	 * Reschedules an event only if its claim is still current.
+	 * Reschedules an event for retry only if the claim is still current.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -140,7 +190,7 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("nextAttemptAt") Instant nextAttemptAt, @Param("lastError") String lastError);
 
 	/**
-	 * Marks an event as permanently failed only if its claim is current.
+	 * Marks an event as permanently failed only if the claim is current.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -161,11 +211,10 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("lastError") String lastError);
 
 	/**
-	 * Requeues a permanently failed event for an explicit administrative replay.
+	 * Atomically requeues a FAILED event for administrative replay.
 	 *
-	 * The event identity and payload are deliberately preserved. The status
-	 * predicate makes this operation safe against concurrent replay requests and
-	 * prevents replay of PENDING, PROCESSING, or PUBLISHED events.
+	 * Only one concurrent request can transition the event because the update
+	 * requires the current status to be FAILED.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """

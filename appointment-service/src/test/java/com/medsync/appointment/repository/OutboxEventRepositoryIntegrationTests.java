@@ -93,20 +93,71 @@ class OutboxEventRepositoryIntegrationTests {
 	}
 
 	@Test
-	void claimBatchReclaimsProcessingEventAfterLeaseExpires() {
+	void expiredProcessingEventAtMaximumAttemptsIsMarkedFailed() {
 
-		OutboxEvent event = saveProcessingEvent("expired-lease", Instant.now().minusSeconds(30), 1);
+		OutboxEvent event = saveProcessingEvent("expired-exhausted", Instant.parse("2000-01-01T00:00:00Z"),
+				properties.getMaxAttempts());
 
 		List<OutboxEvent> claimedEvents = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
 
 		OutboxEvent reloadedEvent = findEvent(event.getEventId());
 
-		assertThat(claimedEvents).extracting(OutboxEvent::getEventId).contains(event.getEventId());
+		assertThat(claimedEvents).extracting(OutboxEvent::getEventId).doesNotContain(event.getEventId());
 
-		assertThat(reloadedEvent.getStatus()).isEqualTo(OutboxEventStatus.PROCESSING);
+		assertThat(reloadedEvent.getStatus()).isEqualTo(OutboxEventStatus.FAILED);
 
-		assertThat(reloadedEvent.getAttempts()).isEqualTo(2);
-		assertThat(reloadedEvent.getLockedUntil()).isAfter(Instant.now());
+		assertThat(reloadedEvent.getAttempts()).isEqualTo(properties.getMaxAttempts());
+
+		assertThat(reloadedEvent.getLockedUntil()).isNull();
+
+		assertThat(reloadedEvent.getLastError()).isEqualTo("Lease expired after maximum delivery attempts");
+
+		assertThat(reloadedEvent.getProcessedAt()).isNull();
+
+		assertThat(reloadedEvent.getVersion()).isGreaterThan(event.getVersion());
+	}
+
+	@Test
+	void expiredProcessingEventWithOneAttemptRemainingIsClaimedThenFailedAfterNextExpiry() {
+
+		int maxAttempts = properties.getMaxAttempts();
+
+		OutboxEvent event = saveProcessingEvent("last-attempt-recovery", Instant.parse("2000-01-01T00:00:00Z"),
+				maxAttempts - 1);
+
+		// The event has one attempt remaining.
+		List<OutboxEvent> reclaimedEvents = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
+
+		OutboxEvent reclaimedEvent = findEvent(event.getEventId());
+
+		assertThat(reclaimedEvents).extracting(OutboxEvent::getEventId).contains(event.getEventId());
+
+		assertThat(reclaimedEvent.getStatus()).isEqualTo(OutboxEventStatus.PROCESSING);
+
+		assertThat(reclaimedEvent.getAttempts()).isEqualTo(maxAttempts);
+
+		assertThat(reclaimedEvent.getLockedUntil()).isAfter(Instant.now());
+
+		// Simulate the worker crashing during its final permitted attempt.
+		jdbcTemplate.update("""
+				UPDATE outbox_events
+				SET locked_until = '2000-01-01 00:00:00.000000'
+				WHERE event_id = ?
+				""", event.getEventId());
+
+		List<OutboxEvent> nextBatch = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
+
+		OutboxEvent finalEvent = findEvent(event.getEventId());
+
+		assertThat(nextBatch).extracting(OutboxEvent::getEventId).doesNotContain(event.getEventId());
+
+		assertThat(finalEvent.getStatus()).isEqualTo(OutboxEventStatus.FAILED);
+
+		assertThat(finalEvent.getAttempts()).isEqualTo(maxAttempts);
+
+		assertThat(finalEvent.getLockedUntil()).isNull();
+
+		assertThat(finalEvent.getLastError()).isEqualTo("Lease expired after maximum delivery attempts");
 	}
 
 	@Test
@@ -157,7 +208,7 @@ class OutboxEventRepositoryIntegrationTests {
 
 		OutboxEvent event = savePendingEvent("future-retry", Instant.now().plusSeconds(3600));
 
-		List<Long> eligibleIds = outboxEventRepository.findEligibleEventIds(Instant.now(), 100);
+		List<Long> eligibleIds = outboxEventRepository.findEligibleEventIds(properties.getMaxAttempts(), 100);
 
 		assertThat(eligibleIds).doesNotContain(event.getId());
 
