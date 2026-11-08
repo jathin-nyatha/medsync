@@ -1,3 +1,4 @@
+
 package com.medsync.appointment.worker;
 
 import java.util.List;
@@ -13,6 +14,7 @@ import com.medsync.appointment.observability.OutboxMetrics;
 import com.medsync.appointment.properties.OutboxDispatcherProperties;
 import com.medsync.appointment.service.OutboxEventClaimService;
 import com.medsync.appointment.service.OutboxEventDeliveryService;
+import com.medsync.appointment.service.OutboxEventStateService;
 
 @Component
 @ConditionalOnProperty(prefix = "medsync.outbox.dispatcher", name = "enabled", havingValue = "true")
@@ -22,26 +24,34 @@ public class OutboxDispatcher {
 
 	private final OutboxEventClaimService claimService;
 	private final OutboxEventDeliveryService deliveryService;
+	private final OutboxEventStateService stateService;
 	private final OutboxDispatcherProperties properties;
 	private final OutboxMetrics outboxMetrics;
 
 	public OutboxDispatcher(OutboxEventClaimService claimService, OutboxEventDeliveryService deliveryService,
-			OutboxDispatcherProperties properties, OutboxMetrics outboxMetrics) {
+			OutboxEventStateService stateService, OutboxDispatcherProperties properties, OutboxMetrics outboxMetrics) {
 		this.claimService = claimService;
 		this.deliveryService = deliveryService;
+		this.stateService = stateService;
 		this.properties = properties;
 		this.outboxMetrics = outboxMetrics;
+
 		this.properties.validate();
 	}
 
 	@Scheduled(fixedDelayString = "${medsync.outbox.dispatcher.fixed-delay:5s}")
 	public void dispatchPendingEvents() {
+
 		List<OutboxEvent> claimedEvents;
+
 		try {
 			claimedEvents = claimService.claimBatch(properties.getBatchSize(), properties.getLeaseDuration());
 		} catch (RuntimeException exception) {
+
 			outboxMetrics.recordClaimFailure();
+
 			log.error("Unable to claim outbox events. Dispatcher will retry during the next polling cycle.", exception);
+
 			return;
 		}
 
@@ -52,10 +62,23 @@ public class OutboxDispatcher {
 		}
 
 		log.info("Claimed {} outbox event(s) for delivery.", claimedEvents.size());
+
 		for (OutboxEvent event : claimedEvents) {
+
 			try {
+
+				boolean leaseRenewed = stateService.renewLease(event, properties.getLeaseDuration());
+
+				if (!leaseRenewed) {
+					log.info("Skipping outbox event {} because this worker no longer owns an active lease.",
+							event.getEventId());
+					continue;
+				}
+
 				deliveryService.deliver(event);
+
 			} catch (RuntimeException exception) {
+
 				log.error("Unexpected processing failure for outbox event {}. Its lease will allow recovery.",
 						event.getEventId(), exception);
 			}

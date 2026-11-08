@@ -1,3 +1,4 @@
+
 package com.medsync.appointment.repository;
 
 import java.time.Instant;
@@ -76,6 +77,31 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("leaseUntil") Instant leaseUntil);
 
 	/**
+	 * Renews an active lease only if the worker still owns the expected version.
+	 *
+	 * The expiry check uses the database UTC clock to avoid timezone conversion
+	 * differences between Java Instant and MySQL DATETIME(6).
+	 *
+	 * An expired lease cannot be renewed.
+	 */
+	@Modifying(flushAutomatically = true, clearAutomatically = true)
+	@Query(value = """
+			UPDATE outbox_events
+			SET
+			    locked_until = :leaseUntil,
+			    updated_at = UTC_TIMESTAMP(6),
+			    version = version + 1
+			WHERE
+			    id = :eventId
+			    AND status = 'PROCESSING'
+			    AND version = :expectedVersion
+			    AND locked_until IS NOT NULL
+			    AND locked_until > UTC_TIMESTAMP(6)
+			""", nativeQuery = true)
+	int renewLeaseIfClaimed(@Param("eventId") Long eventId, @Param("expectedVersion") Long expectedVersion,
+			@Param("leaseUntil") Instant leaseUntil);
+
+	/**
 	 * Marks an event as published only if it is still owned by the worker that
 	 * claimed the expected version.
 	 */
@@ -98,7 +124,7 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("processedAt") Instant processedAt);
 
 	/**
-	 * Schedules another delivery attempt.
+	 * Reschedules an event for retry only if the claim is still current.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """
@@ -120,7 +146,7 @@ public interface OutboxEventRepository extends JpaRepository<OutboxEvent, Long> 
 			@Param("nextAttemptAt") Instant nextAttemptAt, @Param("lastError") String lastError);
 
 	/**
-	 * Marks an event as permanently failed.
+	 * Marks an event as permanently failed only if the claim is current.
 	 */
 	@Modifying(flushAutomatically = true, clearAutomatically = true)
 	@Query(value = """

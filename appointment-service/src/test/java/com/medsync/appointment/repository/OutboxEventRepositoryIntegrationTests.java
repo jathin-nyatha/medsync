@@ -32,6 +32,8 @@ class OutboxEventRepositoryIntegrationTests {
 
 	private static final String TEST_PREFIX = "it-outbox-" + UUID.randomUUID() + "-";
 
+	private static final Duration TEST_LEASE_DURATION = Duration.ofMinutes(2);
+
 	@Autowired
 	private OutboxEventRepository outboxEventRepository;
 
@@ -57,7 +59,7 @@ class OutboxEventRepositoryIntegrationTests {
 
 		OutboxEvent savedEvent = savePendingEvent("claim-pending");
 
-		List<OutboxEvent> claimedEvents = outboxEventClaimService.claimBatch(100, Duration.ofMinutes(2));
+		List<OutboxEvent> claimedEvents = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
 
 		OutboxEvent claimedEvent = findEvent(savedEvent.getEventId());
 
@@ -75,11 +77,11 @@ class OutboxEventRepositoryIntegrationTests {
 
 		OutboxEvent savedEvent = savePendingEvent("claim-once");
 
-		List<OutboxEvent> firstBatch = outboxEventClaimService.claimBatch(100, Duration.ofMinutes(2));
+		List<OutboxEvent> firstBatch = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
 
 		assertThat(firstBatch).extracting(OutboxEvent::getEventId).contains(savedEvent.getEventId());
 
-		List<OutboxEvent> secondBatch = outboxEventClaimService.claimBatch(100, Duration.ofMinutes(2));
+		List<OutboxEvent> secondBatch = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
 
 		assertThat(secondBatch).extracting(OutboxEvent::getEventId).doesNotContain(savedEvent.getEventId());
 
@@ -95,7 +97,7 @@ class OutboxEventRepositoryIntegrationTests {
 
 		OutboxEvent event = saveProcessingEvent("expired-lease", Instant.now().minusSeconds(30), 1);
 
-		List<OutboxEvent> claimedEvents = outboxEventClaimService.claimBatch(100, Duration.ofMinutes(2));
+		List<OutboxEvent> claimedEvents = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
 
 		OutboxEvent reloadedEvent = findEvent(event.getEventId());
 
@@ -141,7 +143,7 @@ class OutboxEventRepositoryIntegrationTests {
 					throw new IllegalStateException("Timed out waiting to start first worker");
 				}
 
-				return outboxEventClaimService.claimBatch(100, Duration.ofMinutes(2));
+				return outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
 			});
 
 			Future<List<OutboxEvent>> secondWorker = executor.submit(() -> {
@@ -151,12 +153,11 @@ class OutboxEventRepositoryIntegrationTests {
 					throw new IllegalStateException("Timed out waiting to start second worker");
 				}
 
-				return outboxEventClaimService.claimBatch(100, Duration.ofMinutes(2));
+				return outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
 			});
 
 			assertThat(ready.await(5, TimeUnit.SECONDS)).as("Both workers should be ready before starting").isTrue();
 
-			// Release both workers together to create claim contention.
 			start.countDown();
 
 			List<OutboxEvent> firstResults = firstWorker.get(15, TimeUnit.SECONDS);
@@ -216,7 +217,6 @@ class OutboxEventRepositoryIntegrationTests {
 
 		Long staleVersion = staleClaim.getVersion();
 
-		// Simulate another worker or database operation advancing the version.
 		jdbcTemplate.update("""
 				UPDATE outbox_events
 				SET version = version + 1
@@ -256,6 +256,7 @@ class OutboxEventRepositoryIntegrationTests {
 		assertThat(reloadedEvent.getNextAttemptAt()).isAfter(Instant.now());
 
 		assertThat(reloadedEvent.getLockedUntil()).isNull();
+
 		assertThat(reloadedEvent.getLastError()).contains("Notification Service unavailable");
 
 		assertThat(reloadedEvent.getProcessedAt()).isNull();
@@ -279,16 +280,109 @@ class OutboxEventRepositoryIntegrationTests {
 
 		assertThat(reloadedEvent.getAttempts()).isEqualTo(1);
 		assertThat(reloadedEvent.getLockedUntil()).isNull();
+
 		assertThat(reloadedEvent.getLastError()).contains("Invalid notification payload");
 
 		assertThat(reloadedEvent.getProcessedAt()).isNull();
 	}
 
+	@Test
+	void renewLeaseExtendsActiveLeaseAndAdvancesClaimVersion() {
+
+		OutboxEvent event = savePendingEvent("renew-active");
+
+		OutboxEvent claimedEvent = claimEvent(event.getEventId());
+
+		Instant originalLeaseUntil = claimedEvent.getLockedUntil();
+		Long originalVersion = claimedEvent.getVersion();
+
+		Instant renewalStartedAt = Instant.now();
+
+		boolean renewed = outboxEventStateService.renewLease(claimedEvent, TEST_LEASE_DURATION);
+
+		Instant renewalCompletedAt = Instant.now();
+
+		OutboxEvent reloadedEvent = findEvent(event.getEventId());
+
+		assertThat(renewed).isTrue();
+
+		assertThat(reloadedEvent.getStatus()).isEqualTo(OutboxEventStatus.PROCESSING);
+
+		assertThat(reloadedEvent.getLockedUntil()).isAfter(originalLeaseUntil);
+
+		// MySQL DATETIME(6) and JDBC may round nanoseconds at the
+		// microsecond boundary. Verify a safe time window instead
+		// of requiring exact Instant equality.
+		assertThat(reloadedEvent.getLockedUntil()).isBetween(renewalStartedAt.plus(TEST_LEASE_DURATION).minusSeconds(1),
+				renewalCompletedAt.plus(TEST_LEASE_DURATION).plusSeconds(1));
+
+		assertThat(reloadedEvent.getVersion()).isEqualTo(originalVersion + 1);
+
+		assertThat(claimedEvent.getVersion()).isEqualTo(originalVersion + 1);
+
+		assertThat(claimedEvent.getLockedUntil()).isEqualTo(reloadedEvent.getLockedUntil());
+	}
+
+	@Test
+	void renewLeaseRejectsExpiredLease() {
+
+		OutboxEvent event = savePendingEvent("renew-expired");
+
+		OutboxEvent claimedEvent = claimEvent(event.getEventId());
+
+		jdbcTemplate.update("""
+				UPDATE outbox_events
+				SET locked_until = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 30 SECOND)
+				WHERE id = ?
+				""", claimedEvent.getId());
+		boolean renewed = outboxEventStateService.renewLease(claimedEvent, TEST_LEASE_DURATION);
+
+		OutboxEvent reloadedEvent = findEvent(event.getEventId());
+
+		assertThat(renewed).isFalse();
+
+		assertThat(reloadedEvent.getStatus()).isEqualTo(OutboxEventStatus.PROCESSING);
+
+		assertThat(reloadedEvent.getLockedUntil()).isBefore(Instant.now());
+
+		assertThat(reloadedEvent.getVersion()).isEqualTo(claimedEvent.getVersion());
+	}
+
+	@Test
+	void renewLeaseRejectsStaleClaimVersion() {
+
+		OutboxEvent event = savePendingEvent("renew-stale");
+
+		OutboxEvent staleClaim = claimEvent(event.getEventId());
+
+		Long staleVersion = staleClaim.getVersion();
+
+		jdbcTemplate.update("""
+				UPDATE outbox_events
+				SET version = version + 1
+				WHERE event_id = ?
+				""", event.getEventId());
+
+		boolean renewed = outboxEventStateService.renewLease(staleClaim, TEST_LEASE_DURATION);
+
+		OutboxEvent reloadedEvent = findEvent(event.getEventId());
+
+		assertThat(renewed).isFalse();
+
+		assertThat(reloadedEvent.getStatus()).isEqualTo(OutboxEventStatus.PROCESSING);
+
+		assertThat(reloadedEvent.getVersion()).isEqualTo(staleVersion + 1);
+	}
+
 	private OutboxEvent savePendingEvent(String suffix) {
-		return savePendingEvent(suffix, Instant.now().minusSeconds(5));
+
+		// Use an old, deterministic eligibility timestamp so test events
+		// are not pushed out of the claim batch by unrelated test data.
+		return savePendingEvent(suffix, Instant.parse("2000-01-01T00:00:00Z"));
 	}
 
 	private OutboxEvent savePendingEvent(String suffix, Instant nextAttemptAt) {
+
 		OutboxEvent event = createEvent(suffix);
 
 		event.setNextAttemptAt(nextAttemptAt);
@@ -297,6 +391,7 @@ class OutboxEventRepositoryIntegrationTests {
 	}
 
 	private OutboxEvent saveProcessingEvent(String suffix, Instant lockedUntil, int attempts) {
+
 		OutboxEvent event = createEvent(suffix);
 
 		event.setStatus(OutboxEventStatus.PROCESSING);
@@ -323,7 +418,7 @@ class OutboxEventRepositoryIntegrationTests {
 
 	private OutboxEvent claimEvent(String eventId) {
 
-		List<OutboxEvent> claimedEvents = outboxEventClaimService.claimBatch(100, Duration.ofMinutes(2));
+		List<OutboxEvent> claimedEvents = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
 
 		return claimedEvents.stream().filter(event -> event.getEventId().equals(eventId)).findFirst()
 				.orElseThrow(() -> new AssertionError("Expected event to be claimed: " + eventId));
