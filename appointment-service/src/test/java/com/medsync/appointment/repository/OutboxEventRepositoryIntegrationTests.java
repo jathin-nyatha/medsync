@@ -110,6 +110,49 @@ class OutboxEventRepositoryIntegrationTests {
 	}
 
 	@Test
+	void oldWorkerCannotPublishEventAfterAnotherWorkerReclaimsExpiredLease() {
+
+		// Arrange: Worker A claims the event.
+		OutboxEvent event = savePendingEvent("reclaim-fencing");
+
+		OutboxEvent workerAClaim = claimEvent(event.getEventId());
+
+		Long workerAVersion = workerAClaim.getVersion();
+
+		// Simulate Worker A's lease expiring.
+		jdbcTemplate.update("""
+				UPDATE outbox_events
+				SET locked_until = DATE_SUB(UTC_TIMESTAMP(6), INTERVAL 30 SECOND)
+				WHERE id = ?
+				""", workerAClaim.getId());
+
+		// Act: Worker B reclaims the expired event.
+		List<OutboxEvent> workerBClaims = outboxEventClaimService.claimBatch(100, TEST_LEASE_DURATION);
+
+		OutboxEvent workerBClaim = findEvent(event.getEventId());
+
+		// Assert: Worker B owns a newer claim.
+		assertThat(workerBClaims).extracting(OutboxEvent::getEventId).contains(event.getEventId());
+
+		assertThat(workerBClaim.getStatus()).isEqualTo(OutboxEventStatus.PROCESSING);
+		assertThat(workerBClaim.getAttempts()).isEqualTo(2);
+		assertThat(workerBClaim.getVersion()).isGreaterThan(workerAVersion);
+		assertThat(workerBClaim.getLockedUntil()).isAfter(Instant.now());
+
+		// Worker A attempts to publish using its stale claim.
+		boolean workerAPublished = outboxEventStateService.markPublished(workerAClaim);
+
+		OutboxEvent finalEvent = findEvent(event.getEventId());
+
+		// Worker A must not overwrite Worker B's claim.
+		assertThat(workerAPublished).isFalse();
+		assertThat(finalEvent.getStatus()).isEqualTo(OutboxEventStatus.PROCESSING);
+		assertThat(finalEvent.getVersion()).isEqualTo(workerBClaim.getVersion());
+		assertThat(finalEvent.getAttempts()).isEqualTo(2);
+		assertThat(finalEvent.getProcessedAt()).isNull();
+	}
+
+	@Test
 	void futurePendingEventIsNotEligibleForClaiming() {
 
 		OutboxEvent event = savePendingEvent("future-retry", Instant.now().plusSeconds(3600));
